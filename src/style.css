@@ -1,0 +1,13 @@
+@import "tailwindcss/preflight";
+@import "tailwindcss/theme";
+@import "tailwindcss/utilities";
+
+/* Reset #app so Vue's mount point doesn't constrain layout */
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  display: block;
+}
+
