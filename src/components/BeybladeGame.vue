@@ -3,6 +3,7 @@ import { ref, watch } from 'vue'
 import { BUILD_DEFS } from '../data/buildDefs.js'
 import { useBeybladeSimulation } from '../composables/useBeybladeSimulation.js'
 import snowverLogo from '../assets/snowverpowered.png'
+import { Zap, Anvil, Heart } from 'lucide-vue-next'
 
 // mountRef is the only thing the component owns — it's the Three.js canvas container
 const mountRef = ref(null)
@@ -282,14 +283,14 @@ const controlsList = [
               <div class="text-[10px] text-white/32 leading-relaxed">{{ build.description }}</div>
               <div v-if="selectedBuild === build.key" class="mt-3 space-y-1.5 border-t border-white/[0.06] pt-2.5">
                 <div
-                  v-for="({ label, val }) in [
-                    { label: 'SPD', val: build.stats.speed },
-                    { label: 'WGT', val: build.stats.weight },
-                    { label: 'STM', val: build.stats.stamina },
-                  ]" :key="label"
+                  v-for="({ icon, val }) in [
+                    { icon: Zap,   val: build.stats.speed },
+                    { icon: Anvil, val: build.stats.weight },
+                    { icon: Heart, val: build.stats.stamina },
+                  ]" :key="val"
                   class="flex items-center gap-2.5"
                 >
-                  <span class="text-[7px] font-bold uppercase tracking-[0.28em] text-white/28 w-7 flex-shrink-0">{{ label }}</span>
+                  <component :is="icon" class="w-4 h-4 flex-shrink-0 text-white/30" :stroke-width="2" />
                   <div class="flex-1 h-[2px]" style="background:rgba(255,255,255,0.07)">
                     <div class="h-full" :style="{ width: Math.round(val / 1.5 * 100) + '%', background: build.color, boxShadow: `0 0 5px ${build.color}88` }" />
                   </div>
