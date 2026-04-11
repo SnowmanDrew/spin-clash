@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { BUILD_DEFS } from '../data/buildDefs.js'
 import { useBeybladeSimulation } from '../composables/useBeybladeSimulation.js'
+import snowverLogo from '../assets/snowverpowered.png'
 
 // mountRef is the only thing the component owns — it's the Three.js canvas container
 const mountRef = ref(null)
@@ -328,6 +329,12 @@ const controlsList = [
                 </div>
               </div>
             </div>
+          </div>
+
+          <!-- Snowver footer -->
+          <div class="px-4 pb-4 pt-2 flex items-center justify-center gap-3">
+            <span class="text-[13px] text-white/60">by</span>
+            <img :src="snowverLogo" alt="Snowverpowered" class="h-10 w-auto" />
           </div>
 
         </aside>
