@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: spin-clash-room-server
+    runtime: node
+    plan: starter
+    rootDir: .
+    buildCommand: npm install
+    startCommand: npm run server
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20

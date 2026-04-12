@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:server": "node --watch server/roomServer.js",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "node server/roomServer.js"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.19.3",
@@ -14,7 +16,8 @@
     "lucide-vue-next": "^1.0.0",
     "tailwindcss": "^4.2.2",
     "three": "^0.183.2",
-    "vue": "^3.5.32"
+    "vue": "^3.5.32",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.5",
