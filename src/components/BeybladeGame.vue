@@ -36,6 +36,28 @@ const controlsList = [
   ['E', 'Stabilise / reduce wobble'],
   ['Q', 'Ultimate (full meter)'],
 ]
+
+function buildCardStyle(build, isSelected) {
+  return {
+    borderLeftColor: isSelected ? build.color : 'transparent',
+    background: isSelected
+      ? `linear-gradient(135deg, ${build.color}1f 0%, ${build.accent}10 26%, rgba(16,16,26,0.98) 68%)`
+      : `linear-gradient(135deg, ${build.color}0d 0%, rgba(13,13,18,0.97) 46%, rgba(8,8,12,0.98) 100%)`,
+    boxShadow: isSelected
+      ? `inset 0 0 28px ${build.color}18, 0 0 0 1px ${build.color}26, 0 0 22px ${build.accent}12`
+      : `inset 0 0 16px ${build.color}08, 0 0 0 1px rgba(255,255,255,0.05)`,
+  }
+}
+
+function spotlightStyle(buildKey) {
+  const build = BUILD_DEFS[buildKey]
+  return {
+    background: `linear-gradient(145deg, ${build.color}18 0%, rgba(10,10,16,0.95) 28%, rgba(10,10,16,0.98) 100%)`,
+    border: `1px solid ${build.color}24`,
+    borderLeft: `3px solid ${build.color}`,
+    boxShadow: `0 0 0 1px ${build.color}24,0 0 36px ${build.color}12,inset 0 0 24px ${build.accent}0f`,
+  }
+}
 </script>
 
 <template>
@@ -253,9 +275,8 @@ const controlsList = [
 
           <div class="h-4 flex-shrink-0" />
           <!-- Section header — cyan diagonal trapezoid -->
-          <div class="bg-[#00E5FF] px-5 pt-4 pb-3 flex-shrink-0" style="clip-path:polygon(0 0,100% 0,92% 100%,0 100%)">
-            <div class="text-[7px] uppercase tracking-[0.6em] text-[#060610]/55 mb-0.5">Select Build</div>
-            <div class="text-[17px] font-black uppercase tracking-tight text-[#060610] leading-none">Blade Select</div>
+          <div class="bg-[#00E5FF] px-5 py-3 flex-shrink-0" style="clip-path:polygon(0 0,100% 0,92% 100%,0 100%)">
+            <div class="text-[16px] font-black uppercase tracking-tight text-[#060610] leading-none">Blade Select</div>
           </div>
 
           <!-- Build cards -->
@@ -264,12 +285,15 @@ const controlsList = [
               v-for="build in buildEntries"
               :key="build.key"
               @click="selectedBuild = build.key"
-              class="cb-card p-3"
+              class="cb-card relative overflow-hidden p-3"
               :class="{ 'is-selected': selectedBuild === build.key }"
-              :style="{ borderLeftColor: selectedBuild === build.key ? build.color : 'transparent' }"
+              :style="buildCardStyle(build, selectedBuild === build.key)"
             >
+              <div class="absolute inset-0 pointer-events-none opacity-100" :style="{ background: `radial-gradient(circle at 100% 0%, ${build.accent}18 0%, transparent 42%)` }" />
+              <div class="absolute top-0 right-0 h-[2px] w-14 pointer-events-none" :style="{ background: `linear-gradient(90deg, transparent, ${build.accent})` }" />
+
               <div class="flex items-center justify-between mb-1.5">
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2 min-w-0">
                   <div class="w-2.5 h-2.5 flex-shrink-0" :style="{ background: build.color, clipPath: 'polygon(50% 0,100% 50%,50% 100%,0 50%)' }" />
                   <span class="font-black uppercase tracking-[0.1em] text-[13px]">{{ build.name }}</span>
                 </div>
@@ -365,12 +389,7 @@ const controlsList = [
             <div
               v-if="cardVisible"
               class="w-full max-w-[460px] text-left cb-spotlight"
-              :style="{
-                background: 'rgba(10,10,16,0.94)',
-                border: '1px solid rgba(255,255,255,0.09)',
-                borderLeft: `3px solid ${BUILD_DEFS[displayBuild].color}`,
-                boxShadow: `0 0 0 1px ${BUILD_DEFS[displayBuild].color}28,0 0 36px ${BUILD_DEFS[displayBuild].color}16,inset 0 0 24px ${BUILD_DEFS[displayBuild].color}0a`
-              }"
+              :style="spotlightStyle(displayBuild)"
             >
               <div class="h-[2px]" :style="{ background: `linear-gradient(90deg,${BUILD_DEFS[displayBuild].color},${BUILD_DEFS[displayBuild].color}00)` }" />
               <div class="p-5">
@@ -406,14 +425,15 @@ const controlsList = [
   border: 1px solid rgba(255,255,255,0.06);
   border-left-width: 3px;
   clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 0 100%);
-  transition: background 0.12s, box-shadow 0.16s, transform 0.22s cubic-bezier(0.34,1.56,0.64,1), max-height 0.3s ease;
+  transition: background 0.12s, box-shadow 0.16s, transform 0.22s cubic-bezier(0.34,1.56,0.64,1), max-height 0.3s ease, border-color 0.16s;
   cursor: pointer;
   width: 100%;
   text-align: left;
 }
 .cb-card:hover {
-  background: #12121c;
-  box-shadow: inset 0 0 20px rgba(0,229,255,0.04);
+  transform: translateX(4px) scale(1.012);
+  box-shadow: inset 0 0 24px rgba(255,255,255,0.05), 0 10px 26px rgba(0,0,0,0.34);
+  border-color: rgba(255,255,255,0.1);
 }
 .cb-card.is-selected {
   background: #10101a;
@@ -422,7 +442,6 @@ const controlsList = [
     inset 0 0 28px rgba(255,255,255,0.03),
     0 0 0 1px rgba(255,255,255,0.07);
 }
-
 /* ─── Launch button ───────────────────────────────────── */
 .cb-btn-launch {
   display: block;

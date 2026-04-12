@@ -12,8 +12,8 @@ export const BUILD_DEFS = {
   defense: {
     key: 'defense',
     name: 'Defense',
-    color: '#3b82f6',
-    accent: '#93c5fd',
+    color: '#10b981',
+    accent: '#6ee7b7',
     description: 'Heavy and stable. Great at resisting knockback and surviving long exchanges.',
     stats: { speed: 0.9, weight: 1.35, stamina: 1.05, grip: 1.1, smash: 0.95, defense: 1.35 },
     specialName: 'Aegis Guard',
@@ -22,8 +22,8 @@ export const BUILD_DEFS = {
   stamina: {
     key: 'stamina',
     name: 'Stamina',
-    color: '#10b981',
-    accent: '#6ee7b7',
+    color: '#3b82f6',
+    accent: '#93c5fd',
     description: 'Efficient spin economy with smooth movement and strong endgame survival.',
     stats: { speed: 0.98, weight: 1.0, stamina: 1.4, grip: 1.0, smash: 0.85, defense: 1.0 },
     specialName: 'Silent Orbit',
@@ -31,7 +31,7 @@ export const BUILD_DEFS = {
   },
   rubber: {
     key: 'rubber',
-    name: 'Rubber / Spin-Steal',
+    name: 'Rubber',
     color: '#a855f7',
     accent: '#e9d5ff',
     description: 'Sticky contact and reverse-spin tricks. Strong against careless opponents.',

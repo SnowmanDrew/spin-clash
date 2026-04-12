@@ -1,6 +1,7 @@
 import { ref, computed, watch } from 'vue'
 import * as THREE from 'three'
 import { BUILD_DEFS, CPU_BUILD_ORDER } from '../data/buildDefs.js'
+import { createBeybladeMesh } from '../models/beyblades/index.js'
 import { useAudio } from './useAudio.js'
 
 // All simulation state and the Three.js / Rapier game loop live here.
@@ -56,7 +57,7 @@ export function useBeybladeSimulation(mountRef) {
         // --- Scene setup ---
         const scene = new THREE.Scene()
         scene.background = new THREE.Color(0x0c0820)
-        scene.fog = new THREE.Fog(0x0c0820, 10, 24)
+        scene.fog = new THREE.Fog(0x0c0820, 18, 34)
 
         const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -66,8 +67,8 @@ export function useBeybladeSimulation(mountRef) {
         mount.innerHTML = ''
         mount.appendChild(renderer.domElement)
 
-        const camera = new THREE.PerspectiveCamera(48, mount.clientWidth / mount.clientHeight, 0.1, 100)
-        camera.position.set(0, 12.5, 11.5)
+        const camera = new THREE.PerspectiveCamera(52, mount.clientWidth / mount.clientHeight, 0.1, 100)
+        camera.position.set(0, 18, 16)
         camera.lookAt(0, 0, 0)
 
         const hemi = new THREE.HemisphereLight(0xc7f2ff, 0x0b1220, 1.25)
@@ -88,322 +89,163 @@ export function useBeybladeSimulation(mountRef) {
         purpleGlow.position.set(-3, 2.5, -3)
         scene.add(purpleGlow)
 
-        // --- Arena geometry ---
-        const floor = new THREE.Mesh(
-          new THREE.CylinderGeometry(9.4, 10.2, 1.2, 64),
-          new THREE.MeshStandardMaterial({ color: 0x19114e, roughness: 0.72, metalness: 0.15 })
-        )
-        floor.receiveShadow = true
-        floor.position.y = -0.65
-        scene.add(floor)
+        // --- Arena geometry (concave dish stadium) ---
 
-        const bowl = new THREE.Mesh(
-          new THREE.CylinderGeometry(8.1, 9.0, 0.8, 64, 1, true),
-          new THREE.MeshStandardMaterial({ color: 0x0e0828, roughness: 0.35, metalness: 0.4, side: THREE.DoubleSide })
-        )
-        bowl.position.y = -0.15
-        bowl.receiveShadow = true
-        scene.add(bowl)
+        const STADIUM = {
+          floorY: 0.22,
+          flatRadius: 1.85,
+          bankRadius: 7.15,
+          lipRadius: 8.60,
+          ejectRadius: 8.98,
+          outerRadius: 9.55,
+          bankHeight: 0.56,
+          lipHeight: 1.22,
+          outerHeight: -0.08,
+          bankGravity: 13.2,
+          bladeLift: 0.08,
+          tiltScale: 0.36,
+          wobbleBankDamping: 0.96,
+          ringOutLift: 4.6,
+          ringOutDrag: 0.992,
+          ringOutGravity: 10.2,
+        }
 
-        const outerNeon = new THREE.Mesh(
-          new THREE.TorusGeometry(8.15, 0.22, 16, 72),
-          new THREE.MeshStandardMaterial({ color: 0x67e8f9, emissive: 0x22d3ee, emissiveIntensity: 1.2, metalness: 0.1, roughness: 0.35 })
-        )
-        outerNeon.rotation.x = Math.PI / 2
-        outerNeon.position.y = 0.04
-        scene.add(outerNeon)
+        function clamp01(value) {
+          return Math.min(1, Math.max(0, value))
+        }
 
-        const innerDisc = new THREE.Mesh(
-          new THREE.CircleGeometry(2.4, 48),
-          new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.8, metalness: 0.1 })
-        )
-        innerDisc.rotation.x = -Math.PI / 2
-        innerDisc.position.y = 0.02
-        scene.add(innerDisc)
+        function smooth01(t) {
+          const u = clamp01(t)
+          return u * u * (3 - 2 * u)
+        }
 
-        const decalRing = new THREE.Mesh(
-          new THREE.RingGeometry(2.6, 5.7, 64),
-          new THREE.MeshBasicMaterial({ color: 0x1d4ed8, transparent: true, opacity: 0.2, side: THREE.DoubleSide })
+        function mix(a, b, t) {
+          return a + (b - a) * t
+        }
+
+        function getStadiumHeight(r) {
+          const rc = Math.max(0, r)
+          if (rc <= STADIUM.flatRadius) return STADIUM.floorY
+          if (rc <= STADIUM.bankRadius) {
+            const t = smooth01((rc - STADIUM.flatRadius) / (STADIUM.bankRadius - STADIUM.flatRadius))
+            return mix(STADIUM.floorY, STADIUM.bankHeight, t)
+          }
+          if (rc <= STADIUM.lipRadius) {
+            const t = smooth01((rc - STADIUM.bankRadius) / (STADIUM.lipRadius - STADIUM.bankRadius))
+            return mix(STADIUM.bankHeight, STADIUM.lipHeight, t)
+          }
+          if (rc <= STADIUM.outerRadius) {
+            const t = smooth01((rc - STADIUM.lipRadius) / (STADIUM.outerRadius - STADIUM.lipRadius))
+            return mix(STADIUM.lipHeight, STADIUM.outerHeight, t)
+          }
+          return STADIUM.outerHeight
+        }
+
+        function getStadiumSlope(r) {
+          const eps = 0.04
+          const r0 = Math.max(0, r - eps)
+          const r1 = r + eps
+          return (getStadiumHeight(r1) - getStadiumHeight(r0)) / (r1 - r0)
+        }
+
+        function getSurfaceYAtXZ(x, z, offset = 0) {
+          return getStadiumHeight(Math.hypot(x, z)) + offset
+        }
+
+        // One sampled profile drives the visible bowl, blade height, and radial force.
+        const bowlProfile = []
+        for (let r = 0; r <= STADIUM.outerRadius; r += 0.2) {
+          bowlProfile.push(new THREE.Vector2(r, getStadiumHeight(r)))
+        }
+        bowlProfile.push(new THREE.Vector2(9.90, -0.38))
+        const bowlMesh = new THREE.Mesh(
+          new THREE.LatheGeometry(bowlProfile, 96),
+          new THREE.MeshStandardMaterial({ color: 0x12103a, roughness: 0.28, metalness: 0.55, side: THREE.DoubleSide })
         )
-        decalRing.rotation.x = -Math.PI / 2
-        decalRing.position.y = 0.021
-        scene.add(decalRing)
+        bowlMesh.receiveShadow = true
+        scene.add(bowlMesh)
+
+        // Center hub disc — sits on the flat launch zone.
+        const centerHub = new THREE.Mesh(
+          new THREE.CircleGeometry(1.5, 48),
+          new THREE.MeshBasicMaterial({ color: 0x07051a, side: THREE.DoubleSide })
+        )
+        centerHub.rotation.x = -Math.PI / 2
+        centerHub.position.y = STADIUM.floorY + 0.01
+        scene.add(centerHub)
+
+        // Center glow ring (purple accent) — radius fits inside hub area
+        const centerGlow = new THREE.Mesh(
+          new THREE.RingGeometry(1.25, 1.52, 48),
+          new THREE.MeshBasicMaterial({ color: 0x7040e0, transparent: true, opacity: 0.95, side: THREE.DoubleSide })
+        )
+        centerGlow.rotation.x = -Math.PI / 2
+        centerGlow.position.y = STADIUM.floorY + 0.015
+        scene.add(centerGlow)
+
+        // Center crosshair — short enough to stay in hub zone above bowl surface
+        for (let i = 0; i < 2; i++) {
+          const cLine = new THREE.Mesh(
+            new THREE.PlaneGeometry(3.0, 0.055),
+            new THREE.MeshBasicMaterial({ color: 0x5032c0, transparent: true, opacity: 0.65, side: THREE.DoubleSide })
+          )
+          cLine.rotation.x = -Math.PI / 2
+          cLine.rotation.y = i * Math.PI / 2
+          cLine.position.y = STADIUM.floorY + 0.02
+          scene.add(cLine)
+        }
+
+        // 4 sector wedges confined to the flat center.
+        const secColors = [0x1a1054, 0x0d0a2c]
+        for (let i = 0; i < 4; i++) {
+          const sec = new THREE.Mesh(
+            new THREE.CircleGeometry(1.8, 48, (i / 4) * Math.PI * 2, Math.PI / 2),
+            new THREE.MeshBasicMaterial({ color: secColors[i % 2], transparent: true, opacity: 0.7, side: THREE.DoubleSide })
+          )
+          sec.rotation.x = -Math.PI / 2
+          sec.position.y = STADIUM.floorY + 0.01
+          scene.add(sec)
+        }
+
+        // Stripe rings follow the same stadium surface as the blades.
+        const stripeData = [
+          { r: 3.5, y: getStadiumHeight(3.5) },
+          { r: 6.3, y: getStadiumHeight(6.3) },
+          { r: 7.9, y: getStadiumHeight(7.9) },
+        ]
+        for (const { r, y } of stripeData) {
+          const stripe = new THREE.Mesh(
+            new THREE.TorusGeometry(r, 0.045, 8, 72),
+            new THREE.MeshBasicMaterial({ color: 0x4030c8, transparent: true, opacity: 0.75 })
+          )
+          stripe.rotation.x = Math.PI / 2
+          stripe.position.y = y
+          scene.add(stripe)
+        }
+
+        // Rim neon ring — marks the crest that can still be escaped over.
+        const rimNeon = new THREE.Mesh(
+          new THREE.TorusGeometry(STADIUM.lipRadius, 0.065, 8, 96),
+          new THREE.MeshStandardMaterial({ color: 0x00e5ff, emissive: 0x00e5ff, emissiveIntensity: 3.0, metalness: 0.1, roughness: 0.2 })
+        )
+        rimNeon.rotation.x = Math.PI / 2
+        rimNeon.position.y = STADIUM.lipHeight
+        scene.add(rimNeon)
+
+
 
         // --- Physics world ---
         const world = new World({ x: 0, y: -9.81, z: 0 })
 
         const groundRB = world.createRigidBody(RigidBodyDesc.fixed())
-        world.createCollider(ColliderDesc.cylinder(0.4, 8.4).setTranslation(0, -0.2, 0).setRestitution(0.65).setFriction(0.15), groundRB)
-        world.createCollider(ColliderDesc.cylinder(0.8, 8.95).setTranslation(0, -0.65, 0), groundRB)
-
-        const wallCount = 32
-        for (let i = 0; i < wallCount; i++) {
-          const a = (i / wallCount) * Math.PI * 2
-          const x = Math.cos(a) * 8.2
-          const z = Math.sin(a) * 8.2
-          const wallRB = world.createRigidBody(RigidBodyDesc.fixed().setTranslation(x, 0.35, z).setRotation({ x: 0, y: Math.sin(-a / 2), z: 0, w: Math.cos(-a / 2) }))
-          world.createCollider(ColliderDesc.cuboid(0.35, 0.55, 1.0).setRestitution(0.9).setFriction(0.08), wallRB)
-        }
-
-        // --- Blade mesh builder (cel-shaded, per-build cartoon archetype) ---
-        function makeBeybladeMesh(primary, accent, buildKey) {
-          const group = new THREE.Group()
-          const primaryColor = new THREE.Color(primary)
-
-          // 3-step hard toon gradient — dark / mid / light bands
-          const gradientMap = new THREE.DataTexture(
-            new Uint8Array([58, 138, 228]), 3, 1, THREE.RedFormat
-          )
-          gradientMap.minFilter = THREE.NearestFilter
-          gradientMap.magFilter = THREE.NearestFilter
-          gradientMap.needsUpdate = true
-
-          function toon(color, emissive = 0x000000, emissiveIntensity = 0) {
-            return new THREE.MeshToonMaterial({
-              color: new THREE.Color(color),
-              gradientMap,
-              emissive: new THREE.Color(emissive),
-              emissiveIntensity,
-            })
-          }
-
-          // Black BackSide outline — the classic toon ink-line technique
-          function mkOutline(mesh, s = 1.10) {
-            const o = new THREE.Mesh(
-              mesh.geometry,
-              new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.BackSide })
-            )
-            o.scale.setScalar(s)
-            mesh.add(o)
-          }
-
-          // ---- SHARED BASE STRUCTURE (all builds) ----
-
-          // Ground shadow
-          const shadowDisc = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.98, 0.98, 0.03, 48),
-            new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.22 })
-          )
-          shadowDisc.position.y = -0.20
-          group.add(shadowDisc)
-
-          // Spin tip — sharp silver point at the bottom
-          const spinTip = new THREE.Mesh(
-            new THREE.ConeGeometry(0.08, 0.28, 10),
-            toon(0xd0dce8)
-          )
-          spinTip.rotation.x = Math.PI
-          spinTip.position.y = 0.05
-          mkOutline(spinTip, 1.12)
-          group.add(spinTip)
-
-          // Spin gear housing — squat tapered shaft above the tip
-          const gearHousing = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.40, 0.26, 0.24, 20),
-            toon(0x5e6b76)
-          )
-          gearHousing.position.y = 0.24
-          mkOutline(gearHousing, 1.06)
-          group.add(gearHousing)
-
-          // Gear ridge detail at shaft base
-          const gearRidge = new THREE.Mesh(
-            new THREE.TorusGeometry(0.40, 0.035, 6, 28),
-            toon(0x7c8e99)
-          )
-          gearRidge.rotation.x = Math.PI / 2
-          gearRidge.position.y = 0.14
-          group.add(gearRidge)
-
-          // Weight disk — wide flat silver ring (the heavy "10-wide" type from classic sets)
-          const weightDisk = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.82, 0.78, 0.11, 40),
-            toon(0x9daab5)
-          )
-          weightDisk.position.y = 0.32
-          weightDisk.castShadow = true
-          mkOutline(weightDisk, 1.03)
-          group.add(weightDisk)
-
-          // Weight disk inner raised step
-          const weightInner = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.45, 0.42, 0.15, 30),
-            toon(0xb8c4cc)
-          )
-          weightInner.position.y = 0.33
-          group.add(weightInner)
-
-          // ---- ATTACK RING — unique per build, sits y≈0.38 ----
-          // This is the design signature: each build has completely different geometry here.
-
-          if (buildKey === 'attack') {
-            // DRAGON WINGS — 2 large swept scimitar blades + 2 small counter-fins (Dranzer-style)
-            const bladeMat = toon(primaryColor, primary, 0.18)
-            const accentMat = toon(accent, accent, 0.72)
-
-            for (let i = 0; i < 2; i++) {
-              const a = (i / 2) * Math.PI * 2
-              // Main wing body — long radial box swept forward
-              const wing = new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.14, 0.30), bladeMat)
-              wing.position.set(Math.cos(a + 0.32) * 0.54, 0.38, Math.sin(a + 0.32) * 0.54)
-              wing.rotation.y = a + 0.32
-              wing.castShadow = true
-              mkOutline(wing, 1.07)
-              group.add(wing)
-              // Sharp accent spike at the tip of each wing
-              const tipCone = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.30, 8), accentMat)
-              tipCone.position.set(Math.cos(a + 0.28) * 0.95, 0.38, Math.sin(a + 0.28) * 0.95)
-              tipCone.rotation.z = -Math.PI / 2
-              tipCone.rotation.y = a + 0.28
-              mkOutline(tipCone, 1.14)
-              group.add(tipCone)
-            }
-            // 2 shorter counter-fins offset 90° — swept backward for asymmetry
-            for (let i = 0; i < 2; i++) {
-              const a = (i / 2) * Math.PI * 2 + Math.PI / 2
-              const fin = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.11, 0.20), bladeMat)
-              fin.position.set(Math.cos(a - 0.28) * 0.52, 0.38, Math.sin(a - 0.28) * 0.52)
-              fin.rotation.y = a - 0.28
-              mkOutline(fin, 1.09)
-              group.add(fin)
-            }
-            // Emissive energy ring at attack ring base
-            const atkRing = new THREE.Mesh(
-              new THREE.TorusGeometry(0.76, 0.04, 8, 36),
-              new THREE.MeshStandardMaterial({ color: accent, emissive: accent, emissiveIntensity: 1.1, roughness: 0.16, metalness: 0.08 })
-            )
-            atkRing.rotation.x = Math.PI / 2
-            atkRing.position.y = 0.38
-            group.add(atkRing)
-          }
-
-          if (buildKey === 'defense') {
-            // CASTLE SHIELD — 4 wide blocky panels around a heavy armour ring (Draciel turtle-shell)
-            const shieldMat = toon(primaryColor)
-            const armorMat = toon(accent, accent, 0.28)
-
-            // 4 wide flat shield panels — square and solid
-            for (let i = 0; i < 4; i++) {
-              const a = (i / 4) * Math.PI * 2
-              const panel = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.22, 0.44), shieldMat)
-              panel.position.set(Math.cos(a) * 0.62, 0.38, Math.sin(a) * 0.62)
-              panel.rotation.y = a
-              panel.castShadow = true
-              mkOutline(panel, 1.05)
-              group.add(panel)
-            }
-            // Heavy armour ring binding the panels
-            const armorRing = new THREE.Mesh(
-              new THREE.TorusGeometry(0.80, 0.13, 12, 36),
-              armorMat
-            )
-            armorRing.rotation.x = Math.PI / 2
-            armorRing.position.y = 0.44
-            group.add(armorRing)
-            // Accent bolts at the four shield junctions
-            for (let i = 0; i < 4; i++) {
-              const a = (i / 4) * Math.PI * 2 + Math.PI / 4
-              const bolt = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.11, 8), armorMat)
-              bolt.position.set(Math.cos(a) * 0.80, 0.44, Math.sin(a) * 0.80)
-              group.add(bolt)
-            }
-          }
-
-          if (buildKey === 'stamina') {
-            // AERODYNAMIC SWEPT BLADES — 3 long smooth fan blades, rounded tips (Wolfborg/gyroscope)
-            const bladeMat = toon(primaryColor, primary, 0.12)
-            const capMat = toon(accent, accent, 0.65)
-
-            for (let i = 0; i < 3; i++) {
-              const a = (i / 3) * Math.PI * 2
-              // Long thin swept blade — like a propeller aerofoil
-              const blade = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.09, 0.26), bladeMat)
-              blade.position.set(Math.cos(a - 0.22) * 0.50, 0.38, Math.sin(a - 0.22) * 0.50)
-              blade.rotation.y = a - 0.22
-              blade.castShadow = true
-              mkOutline(blade, 1.07)
-              group.add(blade)
-              // Rounded sphere cap at the outer tip
-              const cap = new THREE.Mesh(new THREE.SphereGeometry(0.098, 10, 10), capMat)
-              cap.position.set(Math.cos(a - 0.22) * 0.92, 0.38, Math.sin(a - 0.22) * 0.92)
-              group.add(cap)
-            }
-            // Bright orbital halo ring — the stamina signature glow
-            const halo = new THREE.Mesh(
-              new THREE.TorusGeometry(0.84, 0.040, 8, 48),
-              new THREE.MeshStandardMaterial({ color: accent, emissive: accent, emissiveIntensity: 2.2, roughness: 0.06, metalness: 0.06 })
-            )
-            halo.rotation.x = Math.PI / 2
-            halo.position.y = 0.50
-            group.add(halo)
-          }
-
-          if (buildKey === 'rubber') {
-            // RUBBER CONTACT RING — solid core with 6 outer bumper pads (studded wheel look)
-            const coreMat = toon(primaryColor, primary, 0.10)
-            const bumperMat = toon(accent, accent, 0.18)
-
-            // Inner ring core body
-            const core = new THREE.Mesh(
-              new THREE.CylinderGeometry(0.60, 0.56, 0.18, 32),
-              coreMat
-            )
-            core.position.y = 0.38
-            mkOutline(core, 1.04)
-            group.add(core)
-            // 3 spoke arms connecting core to bumper ring
-            for (let i = 0; i < 3; i++) {
-              const a = (i / 3) * Math.PI * 2
-              const arm = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.10, 0.16), coreMat)
-              arm.position.set(Math.cos(a) * 0.74, 0.38, Math.sin(a) * 0.74)
-              arm.rotation.y = a
-              group.add(arm)
-            }
-            // 6 outer rubber bumper cylinders — the distinctive studded contact look
-            for (let i = 0; i < 6; i++) {
-              const a = (i / 6) * Math.PI * 2
-              const bumper = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.20, 12), bumperMat)
-              bumper.position.set(Math.cos(a) * 0.86, 0.38, Math.sin(a) * 0.86)
-              mkOutline(bumper, 1.14)
-              group.add(bumper)
-            }
-          }
-
-          // ---- BIT CHIP HOUSING — hexagonal, build-coloured ----
-          const bitHousing = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.24, 0.28, 0.17, 6),
-            toon(primaryColor.clone().offsetHSL(0, 0.04, -0.08))
-          )
-          bitHousing.position.y = 0.48
-          bitHousing.castShadow = true
-          mkOutline(bitHousing, 1.08)
-          group.add(bitHousing)
-
-          // Bit gem — hexagonal emissive jewel on top
-          const gem = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.11, 0.13, 0.09, 6),
-            toon(accent, accent, 2.4)
-          )
-          gem.position.y = 0.58
-          group.add(gem)
-
-          // Aura ring — driven by special meter
-          const aura = new THREE.Mesh(
-            new THREE.TorusGeometry(1.10, 0.03, 8, 52),
-            new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.0 })
-          )
-          aura.rotation.x = Math.PI / 2
-          aura.position.y = 0.26
-          group.add(aura)
-
-          scene.add(group)
-          return { group, aura }
-        }
+        world.createCollider(ColliderDesc.cylinder(0.45, 9.3).setTranslation(0, -0.25, 0).setRestitution(0.65).setFriction(0.15), groundRB)
+        world.createCollider(ColliderDesc.cylinder(0.9, 10.2).setTranslation(0, -0.80, 0), groundRB)
 
         // --- Blade controller factory ---
         function buildController({ key, isPlayer, name, spawnX }) {
           const def = BUILD_DEFS[key]
-          const meshPack = makeBeybladeMesh(def.color, def.accent, key)
+          const meshPack = createBeybladeMesh(def.color, def.accent, key)
+          scene.add(meshPack.group)
           const rb = world.createRigidBody(
             RigidBodyDesc.dynamic()
               .setTranslation(spawnX, 0.22, 0)
@@ -428,7 +270,7 @@ export function useBeybladeSimulation(mountRef) {
             special: 0, alive: true, guarding: 0, silentOrbit: 0,
             vampireDrain: 0, smashWindow: 0, boostCooldown: 0,
             lastImpact: 0, launchAngle: 0, launchPower: 0, score: 0, deathType: null,
-            ultGlow: 0, trailAccum: 0,
+            ultGlow: 0, trailAccum: 0, visualSpin: 0, ringOutTimer: 0.18, ringOutVisual: null,
           }
         }
 
@@ -465,16 +307,19 @@ export function useBeybladeSimulation(mountRef) {
         // --- 3D launch arrow (ArrowHelper) ---
         const launchArrow = new THREE.ArrowHelper(
           new THREE.Vector3(1, 0, 0),
-          new THREE.Vector3(-4.9, 0.25, 0),
-          2.2, 0xFFE500, 0.55, 0.28
+          new THREE.Vector3(-4.9, getSurfaceYAtXZ(-4.9, 0, 0.42), 0),
+          2.2, new THREE.Color(build), 0.55, 0.28
         )
         scene.add(launchArrow)
 
         function updateArrow() {
           const dir = new THREE.Vector3(Math.cos(state.angle), 0, Math.sin(state.angle))
+          const arrowBase = new THREE.Color(state.player.def.color)
+          const arrowAccent = new THREE.Color(state.player.def.accent)
+          launchArrow.position.set(-4.9, getSurfaceYAtXZ(-4.9, 0, 0.42), 0)
           launchArrow.setDirection(dir)
           launchArrow.setLength(1.4 + state.charge * 2.6, 0.55 + state.charge * 0.18, 0.28)
-          launchArrow.setColor(new THREE.Color().setHSL(0.13 - state.charge * 0.10, 1.0, 0.55))
+          launchArrow.setColor(arrowBase.lerp(arrowAccent, state.charge * 0.55))
           aimAngle.value = state.angle
         }
 
@@ -528,13 +373,109 @@ export function useBeybladeSimulation(mountRef) {
           state.particles.push({ mesh: ring, vx: 0, vz: 0, vy: 0, life: 0.5, maxLife: 0.5, shockwave: true })
         }
 
+        const WORLD_UP = new THREE.Vector3(0, 1, 0)
+        const tmpSurfaceNormal = new THREE.Vector3()
+        const tmpSpinAxis = new THREE.Vector3()
+        const tmpBankAxis = new THREE.Vector3()
+        const tmpSurfaceQuat = new THREE.Quaternion()
+        const tmpSpinQuat = new THREE.Quaternion()
+        const tmpWobbleQuatA = new THREE.Quaternion()
+        const tmpWobbleQuatB = new THREE.Quaternion()
+        const tmpTumbleQuat = new THREE.Quaternion()
+        const tmpTumbleAxis = new THREE.Vector3()
+
+        function startRingOutVisual(blade) {
+          const pos = blade.rb.translation()
+          const lv = blade.rb.linvel()
+          const r = Math.hypot(pos.x, pos.z) || 1
+          const radialX = pos.x / r
+          const radialZ = pos.z / r
+          const tangentialX = -radialZ
+          const tangentialZ = radialX
+          const tangentialPush = (Math.random() - 0.5) * 1.6
+          const launchSpeed = Math.hypot(lv.x, lv.z)
+          const travelX = launchSpeed > 0.001 ? lv.x / launchSpeed : radialX
+          const travelZ = launchSpeed > 0.001 ? lv.z / launchSpeed : radialZ
+          const launchOffset = 0.18 + Math.min(0.34, launchSpeed * 0.025)
+          blade.ringOutVisual = {
+            x: pos.x + travelX * launchOffset + radialX * 0.14,
+            y: getSurfaceYAtXZ(pos.x, pos.z, STADIUM.bladeLift) + 0.08 + Math.min(0.22, launchSpeed * 0.015),
+            z: pos.z + travelZ * launchOffset + radialZ * 0.14,
+            vx: lv.x * 1.02 + radialX * (1.9 + launchSpeed * 0.24) + tangentialX * tangentialPush,
+            vy: STADIUM.ringOutLift + Math.min(2.4, launchSpeed * 0.16),
+            vz: lv.z * 1.02 + radialZ * (1.9 + launchSpeed * 0.24) + tangentialZ * tangentialPush,
+            tumbleSpeed: 14 + launchSpeed * 0.7,
+            axisX: tangentialX * 0.65 + radialX * 0.25,
+            axisY: 0.35,
+            axisZ: tangentialZ * 0.65 + radialZ * 0.25,
+          }
+          blade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
+        }
+
+        function updateRingOutVisual(blade, dt) {
+          if (!blade.ringOutVisual) {
+            syncMesh(blade)
+            return
+          }
+
+          const fx = blade.ringOutVisual
+          fx.x += fx.vx * dt
+          fx.y += fx.vy * dt
+          fx.z += fx.vz * dt
+          fx.vy -= STADIUM.ringOutGravity * dt
+          fx.vx *= Math.pow(STADIUM.ringOutDrag, dt * 60)
+          fx.vz *= Math.pow(STADIUM.ringOutDrag, dt * 60)
+          fx.tumbleSpeed *= Math.pow(0.987, dt * 60)
+
+          blade.visualSpin += blade.spin * 0.02 * blade.spinDir
+          blade.spin = Math.max(0, blade.spin - dt * 7.5)
+          blade.wobble = Math.min(0.5, blade.wobble + dt * 0.9)
+          blade.mesh.position.set(fx.x, fx.y, fx.z)
+
+          tmpTumbleAxis.set(fx.axisX, fx.axisY, fx.axisZ).normalize()
+          tmpSpinQuat.setFromAxisAngle(tmpTumbleAxis, fx.tumbleSpeed * dt)
+          blade.mesh.quaternion.multiply(tmpSpinQuat)
+          tmpTumbleQuat.setFromAxisAngle(WORLD_UP, blade.visualSpin)
+          blade.mesh.quaternion.multiply(tmpTumbleQuat)
+
+          blade.aura.material.opacity = Math.max(0, blade.aura.material.opacity - dt * 1.6)
+          blade.aura.scale.setScalar(1 + blade.lastImpact * 0.08 + blade.ultGlow * 2.2)
+          blade.bladeLight.position.set(fx.x, fx.y + 0.35, fx.z)
+          blade.bladeLight.intensity = Math.max(0, blade.bladeLight.intensity - dt * 10)
+        }
+
         // --- Blade visual sync ---
         function syncMesh(blade) {
           const t = blade.rb.translation()
-          blade.mesh.position.set(t.x, 0.02, t.z)
-          blade.mesh.rotation.y += blade.spin * 0.032 * blade.spinDir
-          blade.mesh.rotation.x = Math.sin(performance.now() * 0.02 + t.x) * blade.wobble * 0.7
-          blade.mesh.rotation.z = Math.cos(performance.now() * 0.024 + t.z) * blade.wobble * 0.7
+          const r = Math.hypot(t.x, t.z)
+          const now = performance.now()
+          const slope = getStadiumSlope(r) * STADIUM.tiltScale
+          const radialX = r > 0.0001 ? t.x / r : 1
+          const radialZ = r > 0.0001 ? t.z / r : 0
+          const surfaceY = getStadiumHeight(r)
+          const bankFactor = clamp01(Math.abs(slope) / 0.04)
+          const lipFactor = clamp01((r - (STADIUM.bankRadius - 0.55)) / (STADIUM.lipRadius - (STADIUM.bankRadius - 0.55)))
+          const wobbleScale = Math.max(0.06, 1 - bankFactor * STADIUM.wobbleBankDamping)
+          const upperBankScale = 1 - lipFactor * 0.78
+          const wobbleA = Math.sin(now * 0.02 + t.x) * blade.wobble * 0.16 * wobbleScale * upperBankScale
+          const wobbleB = Math.cos(now * 0.024 + t.z) * blade.wobble * 0.045 * wobbleScale * wobbleScale * upperBankScale * upperBankScale
+
+          blade.mesh.position.set(t.x, surfaceY + STADIUM.bladeLift, t.z)
+          blade.visualSpin += blade.spin * 0.032 * blade.spinDir
+
+          tmpSurfaceNormal.set(-radialX * slope, 1, -radialZ * slope).normalize()
+          tmpSpinAxis.set(-radialZ, 0, radialX).normalize()
+          tmpBankAxis.crossVectors(tmpSpinAxis, tmpSurfaceNormal).normalize()
+
+          tmpSurfaceQuat.setFromUnitVectors(WORLD_UP, tmpSurfaceNormal)
+          tmpSpinQuat.setFromAxisAngle(tmpSurfaceNormal, blade.visualSpin)
+          tmpWobbleQuatA.setFromAxisAngle(tmpSpinAxis, wobbleA)
+          tmpWobbleQuatB.setFromAxisAngle(tmpBankAxis, wobbleB)
+
+          blade.mesh.quaternion.copy(tmpSurfaceQuat)
+          blade.mesh.quaternion.multiply(tmpSpinQuat)
+          blade.mesh.quaternion.multiply(tmpWobbleQuatA)
+          blade.mesh.quaternion.multiply(tmpWobbleQuatB)
           const activeAbility = blade.guarding > 0 || blade.silentOrbit > 0 || blade.vampireDrain > 0 || blade.smashWindow > 0
           blade.aura.material.opacity = Math.min(1.0,
             blade.special / 100 * 0.5 +
@@ -542,7 +483,7 @@ export function useBeybladeSimulation(mountRef) {
             blade.ultGlow * 0.65)
           blade.aura.scale.setScalar(1 + blade.special / 300 + blade.lastImpact * 0.08 + blade.ultGlow * 3.8)
           // Blade point light: pulses hard on ult, softly on impact
-          blade.bladeLight.position.set(t.x, 0.4, t.z)
+          blade.bladeLight.position.set(t.x, surfaceY + 0.38, t.z)
           blade.bladeLight.intensity = blade.ultGlow * 24 + blade.lastImpact * 5
         }
 
@@ -574,6 +515,9 @@ export function useBeybladeSimulation(mountRef) {
           blade.lastImpact = 0.8
           blade.ultGlow = 1.0
           const pos = blade.rb.translation()
+          const groundY = getSurfaceYAtXZ(pos.x, pos.z, 0.03)
+          const lowY = getSurfaceYAtXZ(pos.x, pos.z, 0.08)
+          const midY = getSurfaceYAtXZ(pos.x, pos.z, 0.18)
           const v3 = (x, y, z) => new THREE.Vector3(x, y, z)
           status.value = `${blade.name} used ${blade.def.specialName}!`
 
@@ -585,7 +529,7 @@ export function useBeybladeSimulation(mountRef) {
               new THREE.MeshBasicMaterial({ color: new THREE.Color(color), transparent: true, opacity: 0, side: THREE.DoubleSide })
             )
             ring.rotation.x = -Math.PI / 2
-            ring.position.set(pos.x, 0.08, pos.z)
+            ring.position.set(pos.x, lowY, pos.z)
             ring.visible = delay <= 0
             scene.add(ring)
             state.particles.push({ mesh: ring, life: 0.38, maxLife: 0.38, shockwave: true, shockwaveScale: expandScale, spawnDelay: delay })
@@ -609,7 +553,7 @@ export function useBeybladeSimulation(mountRef) {
                 new THREE.MeshBasicMaterial({ color: colors[i % 4], transparent: true, opacity: 0.95 })
               )
               const d = 0.05 + Math.random() * 0.25
-              spark.position.set(pos.x + Math.cos(dir) * d, 0.06 + Math.random() * 0.12, pos.z + Math.sin(dir) * d)
+              spark.position.set(pos.x + Math.cos(dir) * d, groundY + 0.03 + Math.random() * 0.12, pos.z + Math.sin(dir) * d)
               scene.add(spark)
               const lifeSpan = 0.22 + Math.random() * 0.1
               state.particles.push({
@@ -628,24 +572,27 @@ export function useBeybladeSimulation(mountRef) {
             // ── Aegis Guard ── ground disc flash + 3 staggered hex rings + crystal shards
             blade.guarding = 1.8
             blade.wobble *= 0.3
+            const defenseAccent = new THREE.Color(blade.def.accent)
+            const defenseColor = new THREE.Color(blade.def.color)
+            const defenseLight = defenseAccent.clone().lerp(new THREE.Color(0xffffff), 0.55)
             // Instant ground flash disc
             const disc = new THREE.Mesh(
               new THREE.CircleGeometry(0.55, 32),
-              new THREE.MeshBasicMaterial({ color: 0xdbeafe, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
+              new THREE.MeshBasicMaterial({ color: defenseLight, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
             )
             disc.rotation.x = -Math.PI / 2
-            disc.position.set(pos.x, 0.03, pos.z)
+            disc.position.set(pos.x, groundY, pos.z)
             scene.add(disc)
             state.particles.push({ mesh: disc, life: 0.38, maxLife: 0.38, shockwave: true, shockwaveScale: 4 })
             // 3 staggered hexagonal shield rings — snap out and fade by 0.65s
-            const ringColors = [0xffffff, 0x93c5fd, 0x3b82f6]
+            const ringColors = [0xffffff, defenseAccent.clone(), defenseColor.clone()]
             for (let i = 0; i < 3; i++) {
               const ring = new THREE.Mesh(
                 new THREE.TorusGeometry(0.85, 0.11 - i * 0.015, 6, 48),
                 new THREE.MeshBasicMaterial({ color: ringColors[i], transparent: true, opacity: 0.0 })
               )
               ring.rotation.x = Math.PI / 2
-              ring.position.set(pos.x, 0.14 + i * 0.20, pos.z)
+              ring.position.set(pos.x, lowY + 0.06 + i * 0.20, pos.z)
               ring.visible = false
               scene.add(ring)
               state.particles.push({ mesh: ring, life: 0.65 - i * 0.08, maxLife: 0.65 - i * 0.08, aegis: true, spawnDelay: i * 0.08, followRb: blade.rb })
@@ -656,9 +603,9 @@ export function useBeybladeSimulation(mountRef) {
               const r = 0.22 + Math.random() * 0.65
               const shard = new THREE.Mesh(
                 new THREE.ConeGeometry(0.04 + Math.random() * 0.025, 0.45 + Math.random() * 0.3, 4),
-                new THREE.MeshBasicMaterial({ color: i % 2 === 0 ? 0xbfdbfe : 0xffffff, transparent: true, opacity: 0.9 })
+                new THREE.MeshBasicMaterial({ color: i % 2 === 0 ? defenseAccent : defenseLight, transparent: true, opacity: 0.9 })
               )
-              shard.position.set(pos.x + Math.cos(a) * r, 0.06 + Math.random() * 0.1, pos.z + Math.sin(a) * r)
+              shard.position.set(pos.x + Math.cos(a) * r, groundY + 0.03 + Math.random() * 0.1, pos.z + Math.sin(a) * r)
               shard.rotation.z = (Math.random() - 0.5) * 0.5
               scene.add(shard)
               state.particles.push({ mesh: shard, vx: Math.cos(a) * 0.4, vz: Math.sin(a) * 0.4, vy: 3.5 + Math.random() * 2.0, life: 0.38 + Math.random() * 0.14 })
@@ -671,15 +618,18 @@ export function useBeybladeSimulation(mountRef) {
             // ── Silent Orbit ── sonar echo rings + two counter-rotating orb rings
             blade.silentOrbit = 2.4
             blade.wobble *= 0.4
+            const staminaAccent = new THREE.Color(blade.def.accent)
+            const staminaColor = new THREE.Color(blade.def.color)
+            const staminaMid = staminaColor.clone().lerp(staminaAccent, 0.55)
             // 3 tight sonar-pulse rings that expand gently and follow the blade — staggered 0.1s
-            const echoColors = [0x6ee7b7, 0x34d399, 0x10b981]
+            const echoColors = [staminaAccent.clone(), staminaMid, staminaColor.clone()]
             for (let i = 0; i < 3; i++) {
               const echo = new THREE.Mesh(
                 new THREE.RingGeometry(0.28, 0.46, 32),
                 new THREE.MeshBasicMaterial({ color: new THREE.Color(echoColors[i]), transparent: true, opacity: 0, side: THREE.DoubleSide })
               )
               echo.rotation.x = -Math.PI / 2
-              echo.position.set(pos.x, 0.06 + i * 0.04, pos.z)
+              echo.position.set(pos.x, groundY + 0.03 + i * 0.04, pos.z)
               echo.visible = i === 0
               scene.add(echo)
               state.particles.push({ mesh: echo, life: 0.55, maxLife: 0.55, shockwave: true, shockwaveScale: 2.2, spawnDelay: i * 0.1, followRb: blade.rb })
@@ -691,9 +641,9 @@ export function useBeybladeSimulation(mountRef) {
               const startAngle = (i / 3) * Math.PI * 2 + (inner ? 0 : Math.PI / 3)
               const orb = new THREE.Mesh(
                 new THREE.SphereGeometry(inner ? 0.14 : 0.1, 8, 8),
-                new THREE.MeshBasicMaterial({ color: inner ? 0x10b981 : 0x6ee7b7, transparent: true, opacity: 0.95 })
+                new THREE.MeshBasicMaterial({ color: inner ? staminaColor : staminaAccent, transparent: true, opacity: 0.95 })
               )
-              orb.position.set(pos.x + Math.cos(startAngle) * radius, 0.28 + (i % 3) * 0.1, pos.z + Math.sin(startAngle) * radius)
+              orb.position.set(pos.x + Math.cos(startAngle) * radius, midY + (i % 3) * 0.1, pos.z + Math.sin(startAngle) * radius)
               scene.add(orb)
               state.particles.push({
                 mesh: orb, cx: pos.x, cz: pos.z,
@@ -715,7 +665,7 @@ export function useBeybladeSimulation(mountRef) {
               new THREE.MeshBasicMaterial({ color: 0x1a0033, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
             )
             voidEye.rotation.x = -Math.PI / 2
-            voidEye.position.set(pos.x, 0.04, pos.z)
+            voidEye.position.set(pos.x, groundY + 0.01, pos.z)
             scene.add(voidEye)
             state.particles.push({ mesh: voidEye, life: 0.6, maxLife: 0.6, shockwave: true, shockwaveScale: 0, followRb: blade.rb })
             // 36 drain particles swirling inward from wide radius with strong inward pull
@@ -726,7 +676,7 @@ export function useBeybladeSimulation(mountRef) {
                 new THREE.SphereGeometry(0.058 + Math.random() * 0.038, 6, 6),
                 new THREE.MeshBasicMaterial({ color: i % 3 === 0 ? 0xa855f7 : i % 3 === 1 ? 0xc084fc : 0x7c3aed, transparent: true, opacity: 0.92 })
               )
-              m.position.set(pos.x + Math.cos(angle) * r, 0.08 + Math.random() * 0.25, pos.z + Math.sin(angle) * r)
+              m.position.set(pos.x + Math.cos(angle) * r, lowY + Math.random() * 0.25, pos.z + Math.sin(angle) * r)
               scene.add(m)
               state.particles.push({
                 mesh: m, cx: pos.x, cz: pos.z,
@@ -759,6 +709,14 @@ export function useBeybladeSimulation(mountRef) {
           c.special = 12
           p.wobble = 0.02
           c.wobble = 0.02
+          p.alive = true
+          c.alive = true
+          p.deathType = null
+          c.deathType = null
+          p.ringOutVisual = null
+          c.ringOutVisual = null
+          p.ringOutTimer = 0.18
+          c.ringOutTimer = 0.18
           state.phase = 'fighting'
           state.launched = true
           countdown.value = null
@@ -809,47 +767,153 @@ export function useBeybladeSimulation(mountRef) {
         }
 
         // --- CPU AI ---
+        // State machine: orbit → approach → orbit, overridden by recover (rim) or stabilise (wobble)
         function cpuBrain(dt) {
           if (state.phase !== 'fighting') return
           const cpu = state.cpu
           const player = state.player
           if (!cpu.alive) return
 
+          // Persistent state initialised once per match
+          if (cpu.aiState === undefined) {
+            cpu.aiState = 'orbit'
+            cpu.aiTimer = 0
+            cpu.orbitDir = Math.random() < 0.5 ? 1 : -1
+          }
+
           const cp = cpu.rb.translation()
           const pp = player.rb.translation()
-          const dx = pp.x - cp.x
-          const dz = pp.z - cp.z
-          const dist = Math.hypot(dx, dz) || 1
           const lv = cpu.rb.linvel()
+          const cpuR     = Math.hypot(cp.x, cp.z)
+          const playerR  = Math.hypot(pp.x, pp.z)
+          const dx = pp.x - cp.x, dz = pp.z - cp.z
+          const dist     = Math.hypot(dx, dz) || 1
+          const edgeDist      = 8.15 - cpuR
+          const playerEdgeDist = 8.15 - playerR
+          const cpuSpeed = Math.hypot(lv.x, lv.z)
+          // Radial outward velocity (positive = moving toward rim)
+          const velOut   = cpuR > 0.1 ? (lv.x * cp.x + lv.z * cp.z) / cpuR : 0
 
-          // Arena boundary awareness: if very close to the edge, steer toward center
-          const edgeDist = 8.55 - Math.hypot(cp.x, cp.z)
-          const tooClose = edgeDist < 1.1
-          const targetX = tooClose ? -cp.x : dx
-          const targetZ = tooClose ? -cp.z : dz
-          const targetDist = tooClose ? Math.hypot(cp.x, cp.z) || 1 : dist
-          const nx = targetX / targetDist
-          const nz = targetZ / targetDist
+          cpu.aiTimer = Math.max(0, cpu.aiTimer - dt)
 
-          // Slight brake only right at the lip
-          const velToEdge = (lv.x * cp.x + lv.z * cp.z) / (Math.hypot(cp.x, cp.z) || 1)
-          const edgeBrake = (edgeDist < 1.5 && velToEdge > 0) ? 1 - Math.min(0.45, (1.5 - edgeDist) / 1.5) : 1
+          // ── State transitions ──────────────────────────────────────────────
+          // RECOVER: rim danger always overrides
+          if (edgeDist < 1.8 || (edgeDist < 3.5 && velOut > 3.5)) {
+            cpu.aiState = 'recover'
+          } else if (cpu.aiState === 'recover' && edgeDist > 4.5 && velOut < 0.5) {
+            cpu.aiState = 'orbit'
+            cpu.aiTimer = 0.3
+          }
 
-          const intent = cpu.key === 'attack' ? 1.35 : cpu.key === 'stamina' ? 0.8 : 1.0
+          // STABILISE: dangerous wobble, not already recovering
+          if (cpu.aiState !== 'recover' && cpu.wobble > 0.28 && cpu.spin > 5) {
+            cpu.aiState = 'stabilise'
+          } else if (cpu.aiState === 'stabilise' && (cpu.wobble < 0.10 || cpu.spin < 5)) {
+            cpu.aiState = 'orbit'
+          }
+
+          // ORBIT → APPROACH: engage when player is reachable or near edge
+          if (cpu.aiState === 'orbit' && cpu.aiTimer <= 0 && (dist < 6.5 || playerEdgeDist < 4.0)) {
+            cpu.aiState = 'approach'
+            cpu.aiTimer = 0.5 + Math.random() * 0.9
+          }
+
+          // APPROACH → ORBIT: disengage when timer up
+          if (cpu.aiState === 'approach' && cpu.aiTimer <= 0) {
+            cpu.aiState = 'orbit'
+            cpu.aiTimer = 0.4 + Math.random() * 0.6
+          }
+
+          // ── Movement vectors ───────────────────────────────────────────────
+          let moveX = 0, moveZ = 0
+
+          if (cpu.aiState === 'recover') {
+            // Drive straight inward — no blending, pure escape
+            moveX = cpuR > 0.1 ? -cp.x / cpuR : 0
+            moveZ = cpuR > 0.1 ? -cp.z / cpuR : 0
+
+          } else if (cpu.aiState === 'stabilise') {
+            stabilise(cpu, dt)
+            // Drift gently toward orbit radius while recovering spin
+            const radErr = cpuR - 4.5
+            moveX = cpuR > 0.1 ? (-cp.x / cpuR) * Math.sign(radErr) * 0.3 : 0
+            moveZ = cpuR > 0.1 ? (-cp.z / cpuR) * Math.sign(radErr) * 0.3 : 0
+
+          } else if (cpu.aiState === 'orbit') {
+            // Orbit at r≈4.5 with tangential + radial correction
+            const radErr = cpuR - 4.5
+            const tgX = cpuR > 0.1 ? (-cp.z / cpuR) * cpu.orbitDir : 0
+            const tgZ = cpuR > 0.1 ? ( cp.x / cpuR) * cpu.orbitDir : 0
+            const rdX = cpuR > 0.1 ? -cp.x / cpuR : 0
+            const rdZ = cpuR > 0.1 ? -cp.z / cpuR : 0
+            moveX = tgX * 0.75 + rdX * Math.sign(radErr) * Math.min(1, Math.abs(radErr) * 0.5) * 0.4
+            moveZ = tgZ * 0.75 + rdZ * Math.sign(radErr) * Math.min(1, Math.abs(radErr) * 0.5) * 0.4
+            // Occasionally reverse orbit direction to be unpredictable
+            if (cpu.aiTimer <= 0 && Math.random() < 0.012) {
+              cpu.orbitDir *= -1
+              cpu.aiTimer = 1.5 + Math.random()
+            }
+
+          } else if (cpu.aiState === 'approach') {
+            // Aim through a point just outward of the player with a tangential offset —
+            // creates an angled hit that deflects them toward the rim instead of back to center
+            const prx = playerR > 0.1 ? pp.x / playerR : 0
+            const prz = playerR > 0.1 ? pp.z / playerR : 0
+            const ptx = -prz * cpu.orbitDir * 0.55   // tangential nudge
+            const ptz =  prx * cpu.orbitDir * 0.55
+            const aimX = pp.x + prx * 1.0 + ptx - cp.x
+            const aimZ = pp.z + prz * 1.0 + ptz - cp.z
+            const aimMag = Math.hypot(aimX, aimZ) || 1
+            moveX = aimX / aimMag
+            moveZ = aimZ / aimMag
+          }
+
+          // Normalise so state scalar is the only magnitude driver
+          const moveMag = Math.hypot(moveX, moveZ)
+          if (moveMag > 0.001) { moveX /= moveMag; moveZ /= moveMag }
+
+          // RECOVER gets extra thrust to fight outward momentum; orbit is gentle;
+          // approach is at full strength. Matches player's 7.6*grip nudge per frame.
+          const stateScale = cpu.aiState === 'recover' ? 1.9 : cpu.aiState === 'approach' ? 1.05 : 0.85
+          const buildScale = cpu.key === 'attack' ? 1.1 : cpu.key === 'stamina' ? 0.9 : 1.0
+          const nudge = 7.6 * cpu.def.stats.grip * stateScale * buildScale
           cpu.rb.setLinvel({
-            x: (lv.x + nx * 2.9 * intent * dt) * edgeBrake,
+            x: lv.x + moveX * nudge * dt,
             y: 0,
-            z: (lv.z + nz * 2.9 * intent * dt) * edgeBrake,
+            z: lv.z + moveZ * nudge * dt,
           }, true)
 
-          if (dist < 2.4 && cpu.spin > 8 && cpu.boostCooldown <= 0 && !tooClose && Math.random() < 0.024) burst(cpu, cpu.key === 'attack' ? 1.2 : 1)
-          if (cpu.spin < 8 && Math.random() < 0.04) stabilise(cpu, dt)
-          if (cpu.special >= 100 && (dist < 3.6 || cpu.spin < player.spin) && Math.random() < 0.03) triggerSpecial(cpu)
+          // ── Tool usage ─────────────────────────────────────────────────────
+          // Burst: approaching fast, player is near edge, CPU has clearance
+          if (cpu.aiState === 'approach' && cpuSpeed > 4.0 && dist < 3.5
+              && playerEdgeDist < 5.5 && edgeDist > 3.0
+              && cpu.boostCooldown <= 0 && cpu.spin > 12 && Math.random() < 0.03) {
+            burst(cpu, cpu.key === 'attack' ? 1.2 : 1.0)
+          }
+
+          // Stabilise: opportunistic spin recovery during orbit (costs spin, so gated)
+          if (cpu.aiState === 'orbit' && cpu.wobble > 0.18 && cpu.spin > 10 && Math.random() < 0.05) {
+            stabilise(cpu, dt)
+          }
+
+          // ULT: each build fires at different conditions
+          if (cpu.special >= 100) {
+            let fire = false
+            if (cpu.key === 'attack')  fire = cpuSpeed > 3.5 && dist < 4.0 && playerEdgeDist < 5.5 && Math.random() < 0.06
+            if (cpu.key === 'defense') fire = (dist < 2.8 || cpu.wobble > 0.22) && Math.random() < 0.05
+            if (cpu.key === 'stamina') fire = (cpu.spin < player.spin * 0.9 || cpu.wobble > 0.15) && Math.random() < 0.05
+            if (cpu.key === 'rubber')  fire = dist < 3.0 && Math.random() < 0.06
+            if (!fire && Math.random() < 0.007) fire = true  // don't hoard a full gauge
+            if (fire) triggerSpecial(cpu)
+          }
         }
 
         // --- Blade update ---
         function updateBlade(blade, dt) {
-          if (!blade.alive) return
+          if (!blade.alive) {
+            updateRingOutVisual(blade, dt)
+            return
+          }
           blade.boostCooldown = Math.max(0, blade.boostCooldown - dt)
           blade.guarding = Math.max(0, blade.guarding - dt)
           blade.silentOrbit = Math.max(0, blade.silentOrbit - dt)
@@ -861,6 +925,15 @@ export function useBeybladeSimulation(mountRef) {
           const pos = blade.rb.translation()
           const lv = blade.rb.linvel()
           const speed = Math.hypot(lv.x, lv.z)
+
+          // Stadium force — inward on the bowl, outward once a blade crests the lip.
+          const br = Math.hypot(pos.x, pos.z)
+          if (br > STADIUM.flatRadius) {
+            const slope = getStadiumSlope(br)
+            const bowlAccel = -slope * STADIUM.bankGravity
+            const bnx = pos.x / br, bnz = pos.z / br
+            blade.rb.setLinvel({ x: lv.x + bnx * bowlAccel * dt, y: 0, z: lv.z + bnz * bowlAccel * dt }, true)
+          }
 
           // Dragon Smash trail — spawn glowing discs at blade position
           if (blade.smashWindow > 0) {
@@ -881,14 +954,13 @@ export function useBeybladeSimulation(mountRef) {
             blade.trailAccum = 0
           }
 
-          if (Math.hypot(pos.x, pos.z) > 8.55) {
-            if (!blade.deathType) blade.deathType = 'ring_out'
-            blade.ringOutTimer = (blade.ringOutTimer ?? 0.4) - dt
-            if (blade.ringOutTimer <= 0) {
-              blade.alive = false
-              blade.spin = 0
-              blade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
-            }
+          const radialVel = br > 0.001 ? (lv.x * pos.x + lv.z * pos.z) / br : 0
+          if (br > STADIUM.lipRadius && radialVel > 0.35) {
+            blade.deathType = 'ring_out'
+            startRingOutVisual(blade)
+            blade.alive = false
+          } else {
+            blade.ringOutTimer = 0.18
           }
 
           let drain = 1.6 + speed * 0.13 + blade.wobble * 1.2
@@ -976,9 +1048,12 @@ export function useBeybladeSimulation(mountRef) {
           state.hitStop = Math.max(state.hitStop, Math.min(0.055, impact * 0.002))
           clashFlash.material.opacity = Math.min(0.9, 0.25 + impact * 0.05)
           clashFlash.scale.setScalar(1 + impact * 0.06)
-          clashFlash.position.set((pa.x + pb.x) / 2, 0.08, (pa.z + pb.z) / 2)
+          const hitX = (pa.x + pb.x) / 2
+          const hitZ = (pa.z + pb.z) / 2
+          const hitY = getSurfaceYAtXZ(hitX, hitZ, 0.04)
+          clashFlash.position.set(hitX, hitY, hitZ)
           spawnImpact(
-            new THREE.Vector3((pa.x + pb.x) / 2, 0.2, (pa.z + pb.z) / 2),
+            new THREE.Vector3(hitX, hitY + 0.12, hitZ),
             new THREE.Color(a.def.accent || BUILD_DEFS[a.key].accent).getHex(),
             impact > 10 ? 26 : 16,
             1 + impact * 0.04
@@ -1160,8 +1235,8 @@ export function useBeybladeSimulation(mountRef) {
           state.cameraShake = Math.max(0, state.cameraShake - dt * 1.8)
           camera.position.set(
             Math.sin(now * 0.03) * shake * 0.7,
-            12.5 + Math.cos(now * 0.027) * shake * 0.4,
-            11.5 + Math.sin(now * 0.035) * shake * 0.5
+            18 + Math.cos(now * 0.027) * shake * 0.4,
+            16 + Math.sin(now * 0.035) * shake * 0.5
           )
           camera.lookAt(0, 0.1, 0)
 
