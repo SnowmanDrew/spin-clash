@@ -233,6 +233,7 @@ function serialiseRoom(room) {
       loadout: player.loadout,
       record: player.record,
       ready: player.ready,
+      pendingJoin: Boolean(player.pendingJoin),
       connected: player.connected,
     })),
   }
@@ -287,10 +288,6 @@ function joinRoom(socket, roomId) {
     send(socket, 'error_message', { message: 'Room not found.' })
     return
   }
-  if (room.matchActive) {
-    send(socket, 'error_message', { message: 'This room is already in a match.' })
-    return
-  }
   if (room.players.size >= 4) {
     send(socket, 'error_message', { message: 'This room is full.' })
     return
@@ -308,10 +305,13 @@ function joinRoom(socket, roomId) {
     loadout: client.loadout,
     record: client.record,
     ready: false,
+    pendingJoin: room.matchActive,
     connected: true,
     socket,
   })
-  room.statusText = `${client.name} joined the room.`
+  room.statusText = room.matchActive
+    ? `${client.name} will join next round.`
+    : `${client.name} joined the room.`
   broadcastRoomState(room)
 }
 
@@ -388,8 +388,11 @@ function startMatch(socket) {
     return
   }
 
+  players.forEach((player) => {
+    player.pendingJoin = false
+  })
   room.matchActive = true
-  room.statusText = 'Match starting.'
+  room.statusText = 'Session starting.'
   const participants = players.map((player) => ({
     id: player.id,
     name: player.name,
@@ -402,9 +405,41 @@ function startMatch(socket) {
       roomId: room.id,
       hostId: room.hostId,
       participants,
-      scoreToWin: 2,
+      scoreToWin: null,
     })
   }
+  broadcastRoomState(room)
+}
+
+function admitPendingPlayers(socket) {
+  const client = clients.get(socket)
+  const room = requireRoom(socket)
+  if (!client || !room || room.hostId !== client.id || !room.matchActive) return
+
+  const pendingPlayers = [...room.players.values()].filter((player) => player.pendingJoin)
+  if (!pendingPlayers.length) return
+
+  for (const player of pendingPlayers) {
+    player.pendingJoin = false
+    send(player.socket, 'match_started', {
+      roomId: room.id,
+      hostId: room.hostId,
+      participants: [...room.players.values()]
+        .filter((entry) => !entry.pendingJoin)
+        .map((entry) => ({
+          id: entry.id,
+          name: entry.name,
+          build: entry.build,
+          loadout: entry.loadout,
+          record: entry.record,
+        })),
+      scoreToWin: null,
+    })
+  }
+
+  room.statusText = pendingPlayers.length === 1
+    ? `${pendingPlayers[0].name} joins next round.`
+    : `${pendingPlayers.length} players join next round.`
   broadcastRoomState(room)
 }
 
@@ -417,6 +452,19 @@ function relayInput(socket, message) {
   send(host.socket, 'remote_input', {
     playerId: client.id,
     input: message.input || {},
+    sentAt: Date.now(),
+  })
+}
+
+function relayLaunchCommit(socket, message) {
+  const client = clients.get(socket)
+  const room = requireRoom(socket)
+  if (!client || !room || !room.matchActive) return
+  const host = room.players.get(room.hostId)
+  if (!host || host.id === client.id) return
+  send(host.socket, 'launch_commit', {
+    playerId: client.id,
+    launch: message.launch || {},
     sentAt: Date.now(),
   })
 }
@@ -440,7 +488,7 @@ function completeMatch(socket, message) {
   const room = requireRoom(socket)
   if (!client || !room || room.hostId !== client.id) return
   room.matchActive = false
-  room.statusText = message.statusText || 'Match finished.'
+  room.statusText = message.statusText || 'Session finished.'
   if (message.summary?.winnerId) recordCompletedOnlineMatch(message.summary)
   else recordCancelledOnlineMatch()
   for (const player of room.players.values()) {
@@ -511,8 +559,14 @@ wss.on('connection', (socket) => {
       case 'start_match':
         startMatch(socket)
         break
+      case 'admit_pending_players':
+        admitPendingPlayers(socket)
+        break
       case 'input':
         relayInput(socket, message)
+        break
+      case 'launch_commit':
+        relayLaunchCommit(socket, message)
         break
       case 'snapshot':
         relaySnapshot(socket, message)

@@ -24,6 +24,7 @@ const STADIUM = {
 }
 
 const AIM_COUNTDOWN_DURATION = 3.5
+const ONLINE_SESSION_INTERMISSION_DURATION = 5
 
 const LAUNCH_TIMING = {
   idealRelease: 0.18,
@@ -45,8 +46,25 @@ const OPENING_CLASH = {
 }
 
 const SPIN_DRAIN = {
-  passiveScale: 0.68,
-  collisionScale: 0.76,
+  passiveScale: 0.4,
+  collisionScale: 0.48,
+}
+
+const SPECIAL_GAIN = {
+  passiveScale: 0.5,
+  collisionScale: 0.54,
+}
+
+const EDGE_RECOVERY = {
+  warningStartRadius: 7.72,
+  outwardDamping: 0.41,
+  inwardAssist: 5.1,
+  tangentDrag: 0.985,
+  wobbleGain: 0.14,
+  ringOutBuffer: 0.24,
+  ringOutVelocity: 0.46,
+  hardExitVelocity: 0.9,
+  hardExitRadius: 9.42,
 }
 
 const LAUNCH_TIMING_PROFILES = {
@@ -742,6 +760,32 @@ function serialiseInput(input) {
   }
 }
 
+function normalizeLaunchAngle(angle, fallback = 0) {
+  const numericAngle = Number(angle)
+  if (!Number.isFinite(numericAngle)) return fallback
+  return Math.max(-Math.PI * 2, Math.min(Math.PI * 2, numericAngle))
+}
+
+function serialiseLaunchCommit(blade) {
+  return {
+    charge: clamp01(blade.lockedCharge),
+    launchAngle: normalizeLaunchAngle(blade.lockedLaunchAngle, blade.launchAngle),
+    spinDir: blade.lockedSpinDir === -1 ? -1 : 1,
+    timingScore: clamp01(blade.launchTimingScore),
+    forced: Boolean(blade.forcedLaunch),
+  }
+}
+
+function normalizeLaunchCommit(launch, fallbackAngle = 0) {
+  return {
+    charge: clamp01(Number(launch?.charge || 0)),
+    launchAngle: normalizeLaunchAngle(launch?.launchAngle, fallbackAngle),
+    spinDir: launch?.spinDir === -1 ? -1 : 1,
+    timingScore: clamp01(Number(launch?.timingScore || 0)),
+    forced: Boolean(launch?.forced),
+  }
+}
+
 function getBladeTarget(runtimeState, blade) {
   return blade.attackTargetId ? runtimeState.bladesById.get(blade.attackTargetId) || null : null
 }
@@ -1016,6 +1060,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
   const hudPlayers = ref([])
   const roundResult = ref(null)
   const countdown = ref(null)
+  const sessionIntermission = ref({ active: false, seconds: 0 })
   const aimAngle = ref(0)
   const launchBadges = ref([])
   const launchState = ref({
@@ -1052,13 +1097,37 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     const timingScore = getLaunchTimingScore(runtimeState?.countdownTimer || 0, forced, blade)
     const chargeScore = getLaunchChargeScore(blade.charge)
     const finalScore = Math.max(forced ? 0.18 : 0.24, clamp01(timingScore * 0.58 + chargeScore * 0.42))
+    const lockedAngle = normalizeLaunchAngle(blade.launchAngle, blade.spawn?.angle || 0)
     blade.launchLocked = true
     blade.lockedCharge = blade.charge
-    blade.lockedLaunchAngle = blade.launchAngle
+    blade.lockedLaunchAngle = lockedAngle
     blade.lockedSpinDir = blade.spinDir || 1
     blade.launchTimingScore = finalScore
     blade.launchGrade = getLaunchGrade(finalScore, forced)
     blade.forcedLaunch = forced
+    blade.launchAngle = lockedAngle
+    if (runtimeState && blade.id === runtimeState.localPlayerId) {
+      status.value = `${blade.launchGrade} launch locked.`
+    }
+    return true
+  }
+
+  function applyLaunchCommit(blade, launchCommit, runtimeState = null) {
+    if (blade.launchLocked) return false
+    const launchState = normalizeLaunchCommit(launchCommit, blade.spawn?.angle || blade.launchAngle)
+    if (!launchState.forced && launchState.charge < LAUNCH_TIMING.minCharge) {
+      return false
+    }
+    blade.charge = launchState.charge
+    blade.spinDir = launchState.spinDir
+    blade.launchAngle = launchState.launchAngle
+    blade.launchLocked = true
+    blade.lockedCharge = launchState.charge
+    blade.lockedLaunchAngle = launchState.launchAngle
+    blade.lockedSpinDir = launchState.spinDir
+    blade.launchTimingScore = launchState.timingScore
+    blade.launchGrade = getLaunchGrade(launchState.timingScore, launchState.forced)
+    blade.forcedLaunch = launchState.forced
     if (runtimeState && blade.id === runtimeState.localPlayerId) {
       status.value = `${blade.launchGrade} launch locked.`
     }
@@ -1070,6 +1139,17 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     mutator(nextStats)
     playerStats.value = nextStats
     storePlayerStats(nextStats)
+  }
+
+  function updateSessionIntermissionState(runtimeState = runtime) {
+    if (!runtimeState || runtimeState.phase !== 'session_intermission') {
+      sessionIntermission.value = { active: false, seconds: 0 }
+      return
+    }
+    sessionIntermission.value = {
+      active: true,
+      seconds: Math.max(0, Math.ceil(runtimeState.intermissionTimer || 0)),
+    }
   }
 
   function commitPlayerRecord(matchType, didWin) {
@@ -1135,6 +1215,14 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     commitPlayerRecord(runtimeState.matchStatKey, didWin)
     commitDetailedMatchStats(runtimeState, didWin)
     runtimeState.recordCommitted = true
+  }
+
+  function commitOnlineRoundRecord(runtimeState, winnerId) {
+    if (!runtimeState.networked || runtimeState.lastMatchRecordedRound === runtimeState.round) return
+    const didWin = winnerId === runtimeState.localPlayerId
+    commitPlayerRecord(runtimeState.matchStatKey, didWin)
+    commitDetailedMatchStats(runtimeState, didWin)
+    runtimeState.lastMatchRecordedRound = runtimeState.round
   }
 
   function buildOnlineMatchSummary(runtimeState) {
@@ -1222,19 +1310,32 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         loadoutLabel: blade?.def?.fullName || participant.name,
       }
     })
-    scoreboard.value = hudPlayers.value.map((entry) => ({
-      id: entry.id,
-      name: entry.name,
-      build: entry.build,
-      score: entry.score,
-      isLocal: entry.isLocal,
-      isCpu: entry.isCpu,
-    }))
+    scoreboard.value = hudPlayers.value
+      .map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        build: entry.build,
+        score: entry.score,
+        isLocal: entry.isLocal,
+        isCpu: entry.isCpu,
+      }))
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score
+        if (a.isLocal !== b.isLocal) return a.isLocal ? -1 : 1
+        return a.name.localeCompare(b.name)
+      })
+  }
+
+  function isMatchComplete(runtimeState, winnerId) {
+    return Number.isFinite(runtimeState.scoreToWin) && runtimeState.scoreToWin > 0
+      ? (runtimeState.scores[winnerId] || 0) >= runtimeState.scoreToWin
+      : false
   }
 
   function makeSnapshot(runtimeState) {
     return {
       phase: runtimeState.phase,
+      intermissionTimer: runtimeState.intermissionTimer,
       countdown: countdown.value,
       status: status.value,
       round: runtimeState.round,
@@ -1283,6 +1384,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
           lockedSpinDir: blade.lockedSpinDir,
           launchTimingScore: blade.launchTimingScore,
           launchGrade: blade.launchGrade,
+          forcedLaunch: blade.forcedLaunch,
           pos: { x: pos.x, z: pos.z },
           vel: { x: vel.x, z: vel.z },
           ringOutVisual: blade.ringOutVisual ? { ...blade.ringOutVisual } : null,
@@ -1299,6 +1401,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     })
     if (keyCleanup) keyCleanup()
     launchBadges.value = []
+    sessionIntermission.value = { active: false, seconds: 0 }
     runtime = null
   }
 
@@ -2145,9 +2248,35 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       }
     }
 
+    if (blade.guarding <= 0 && radius > EDGE_RECOVERY.warningStartRadius && radius > 0.001) {
+      const edgeProgress = clamp01((radius - EDGE_RECOVERY.warningStartRadius) / (STADIUM.lipRadius - EDGE_RECOVERY.warningStartRadius))
+      const nx = pos.x / radius
+      const nz = pos.z / radius
+      const outwardVel = Math.max(0, tunedLv.x * nx + tunedLv.z * nz)
+      if (edgeProgress > 0 && outwardVel > 0.01) {
+        const catchBlend = edgeProgress * (radius <= STADIUM.lipRadius + EDGE_RECOVERY.ringOutBuffer ? 1 : 0.38)
+        const tangentialX = tunedLv.x - nx * outwardVel
+        const tangentialZ = tunedLv.z - nz * outwardVel
+        const savedOutward = outwardVel * (1 - EDGE_RECOVERY.outwardDamping * catchBlend)
+        const inwardPull = EDGE_RECOVERY.inwardAssist * catchBlend * dt
+        blade.rb.setLinvel({
+          x: tangentialX * mix(1, EDGE_RECOVERY.tangentDrag, catchBlend) + nx * (savedOutward - inwardPull),
+          y: 0,
+          z: tangentialZ * mix(1, EDGE_RECOVERY.tangentDrag, catchBlend) + nz * (savedOutward - inwardPull),
+        }, true)
+        tunedLv = blade.rb.linvel()
+        blade.wobble = Math.min(0.52, blade.wobble + EDGE_RECOVERY.wobbleGain * catchBlend * dt)
+      }
+    }
+
     const speed = Math.hypot(tunedLv.x, tunedLv.z)
     const radialVel = radius > 0.001 ? (tunedLv.x * pos.x + tunedLv.z * pos.z) / radius : 0
-    if (radius > STADIUM.lipRadius && radialVel > 0.35 * (blade.def.physics.ringOutResist || 1)) {
+    const ringOutResist = blade.def.physics.ringOutResist || 1
+    const pastCatchZone = radius > STADIUM.lipRadius + EDGE_RECOVERY.ringOutBuffer
+    const hardExit = radius > EDGE_RECOVERY.hardExitRadius
+    if ((pastCatchZone && radialVel > EDGE_RECOVERY.ringOutVelocity * ringOutResist)
+      || (radius > STADIUM.lipRadius && radialVel > EDGE_RECOVERY.hardExitVelocity * ringOutResist)
+      || hardExit) {
       blade.deathType = 'ring_out'
       blade.alive = false
       startRingOutVisual(blade)
@@ -2161,7 +2290,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     if (blade.guarding > 0) drain *= DEFENSE_SPECIAL.passiveDrainMultiplier
     drain *= SPIN_DRAIN.passiveScale
     blade.spin = Math.max(0, blade.spin - drain * dt)
-    blade.special = Math.min(100, blade.special + (0.9 + speed * 0.06) * dt * 10)
+    blade.special = Math.min(100, blade.special + (0.9 + speed * 0.06) * dt * 10 * SPECIAL_GAIN.passiveScale)
     const lowSpinRatio = clamp01((18 - blade.spin) / 18)
     if (blade.spin < 18) {
       blade.wobble = Math.min(0.52, blade.wobble + (0.06 + lowSpinRatio * 0.28) * dt * (blade.def.physics.wobbleGainMultiplier || 1))
@@ -2328,8 +2457,8 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       a.spin = Math.max(0, a.spin + Math.max(0, spinEdge) * 0.3)
       b.spin = Math.max(0, b.spin + Math.max(0, -spinEdge) * 0.3)
     }
-    a.special = Math.min(100, a.special + impact * 1.1)
-    b.special = Math.min(100, b.special + impact * 1.1)
+    a.special = Math.min(100, a.special + impact * 1.1 * SPECIAL_GAIN.collisionScale)
+    b.special = Math.min(100, b.special + impact * 1.1 * SPECIAL_GAIN.collisionScale)
     a.wobble = Math.min(0.52, a.wobble + (0.016 + impact * 0.005 / defenseA) * (sameSpin ? 1 : 1.22) * (a.def.physics.wobbleGainMultiplier || 1))
     b.wobble = Math.min(0.52, b.wobble + (0.016 + impact * 0.005 / defenseB) * (sameSpin ? 1 : 1.22) * (b.def.physics.wobbleGainMultiplier || 1))
     a.lastImpact = 0.4
@@ -2347,10 +2476,15 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
   function applySnapshot(runtimeState, snapshot) {
     runtimeState.phase = snapshot.phase
+    runtimeState.intermissionTimer = snapshot.intermissionTimer || 0
     runtimeState.round = snapshot.round
     status.value = snapshot.status
     countdown.value = snapshot.countdown
     roundResult.value = snapshot.roundResult || null
+    updateSessionIntermissionState(runtimeState)
+    if (runtimeState.networked && roundResult.value?.winner) {
+      commitOnlineRoundRecord(runtimeState, roundResult.value.winner)
+    }
     if (roundResult.value?.isMatchOver && roundResult.value.winner) {
       commitMatchRecord(runtimeState, roundResult.value.winner)
     }
@@ -2359,6 +2493,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     for (const playerSnapshot of snapshot.players || []) {
       const blade = runtimeState.bladesById.get(playerSnapshot.id)
       if (!blade) continue
+      const preserveLocalAimingState = !runtimeState.authoritative
+        && playerSnapshot.id === runtimeState.localPlayerId
+        && snapshot.phase === 'aiming'
       if (playerSnapshot.id === runtimeState.localPlayerId) {
         localSnapshot = playerSnapshot
       }
@@ -2367,7 +2504,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.spin = playerSnapshot.spin
       blade.special = playerSnapshot.special
       blade.wobble = playerSnapshot.wobble
-      blade.spinDir = playerSnapshot.spinDir || blade.spinDir || 1
+      blade.spinDir = preserveLocalAimingState
+        ? blade.spinDir || playerSnapshot.spinDir || 1
+        : playerSnapshot.spinDir || blade.spinDir || 1
       blade.guarding = playerSnapshot.guarding
       blade.silentOrbit = playerSnapshot.silentOrbit
       blade.silentOrbitPulse = playerSnapshot.silentOrbitPulse || 0
@@ -2395,15 +2534,16 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.ultGlow = playerSnapshot.ultGlow
       blade.visualSpin = playerSnapshot.visualSpin
       blade.deathType = playerSnapshot.deathType
-      blade.charge = playerSnapshot.charge
-      blade.launchAngle = playerSnapshot.launchAngle
+      blade.charge = preserveLocalAimingState ? blade.charge : playerSnapshot.charge
+      blade.launchAngle = preserveLocalAimingState ? blade.launchAngle : playerSnapshot.launchAngle
       blade.launchPower = playerSnapshot.launchPower
-      blade.launchLocked = Boolean(playerSnapshot.launchLocked)
-      blade.lockedCharge = playerSnapshot.lockedCharge || 0
-      blade.lockedLaunchAngle = playerSnapshot.lockedLaunchAngle || blade.launchAngle
-      blade.lockedSpinDir = playerSnapshot.lockedSpinDir || blade.spinDir || 1
-      blade.launchTimingScore = playerSnapshot.launchTimingScore || 0
-      blade.launchGrade = playerSnapshot.launchGrade || 'Unreleased'
+      blade.launchLocked = preserveLocalAimingState ? blade.launchLocked : Boolean(playerSnapshot.launchLocked)
+      blade.lockedCharge = preserveLocalAimingState ? blade.lockedCharge : playerSnapshot.lockedCharge || 0
+      blade.lockedLaunchAngle = preserveLocalAimingState ? blade.lockedLaunchAngle : playerSnapshot.lockedLaunchAngle || blade.launchAngle
+      blade.lockedSpinDir = preserveLocalAimingState ? blade.lockedSpinDir : playerSnapshot.lockedSpinDir || blade.spinDir || 1
+      blade.launchTimingScore = preserveLocalAimingState ? blade.launchTimingScore : playerSnapshot.launchTimingScore || 0
+      blade.launchGrade = preserveLocalAimingState ? blade.launchGrade : playerSnapshot.launchGrade || 'Unreleased'
+      blade.forcedLaunch = preserveLocalAimingState ? blade.forcedLaunch : Boolean(playerSnapshot.forcedLaunch)
       blade.ringOutVisual = playerSnapshot.ringOutVisual ? { ...playerSnapshot.ringOutVisual } : null
       blade.rb.setTranslation({ x: playerSnapshot.pos.x, y: 0.22, z: playerSnapshot.pos.z }, true)
       blade.rb.setLinvel({ x: playerSnapshot.vel.x, y: 0, z: playerSnapshot.vel.z }, true)
@@ -2529,9 +2669,277 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     world.createCollider(ColliderDesc.cylinder(0.45, 9.3).setTranslation(0, -0.25, 0).setRestitution(0.65).setFriction(0.15), groundRB)
     world.createCollider(ColliderDesc.cylinder(0.9, 10.2).setTranslation(0, -0.8, 0), groundRB)
 
-    const spawnPoints = getSpawnPoints(config.participants.length)
+    let spawnPoints = getSpawnPoints(config.participants.length)
     const blades = []
     const bladesById = new Map()
+
+    function refreshSpawnAssignments() {
+      spawnPoints = getSpawnPoints(runtimeState.participants.length)
+      runtimeState.participants.forEach((participant, index) => {
+        const blade = runtimeState.bladesById.get(participant.id)
+        if (!blade) return
+        blade.spawn = spawnPoints[index] || blade.spawn
+        if (runtimeState.phase !== 'fighting') {
+          blade.rb.setTranslation({ x: blade.spawn.x, y: 0.22, z: blade.spawn.z }, true)
+          blade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
+          setBladeArrow(blade)
+          syncMesh(blade, runtimeState)
+        }
+      })
+    }
+
+    function disposeSceneObject(object) {
+      if (!object) return
+      object.traverse?.((node) => {
+        if (node.geometry?.dispose) node.geometry.dispose()
+        if (Array.isArray(node.material)) {
+          node.material.forEach((material) => material?.dispose?.())
+        } else if (node.material?.dispose) {
+          node.material.dispose()
+        }
+      })
+    }
+
+    function createBladeBody(spawn, def) {
+      const rb = world.createRigidBody(
+        RigidBodyDesc.dynamic()
+          .setTranslation(spawn.x, 0.22, spawn.z)
+          .setCanSleep(false)
+          .lockTranslations()
+      )
+      world.createCollider(
+        ColliderDesc.cylinder(0.18, 0.78)
+          .setRestitution(0.92)
+          .setFriction(0.06)
+          .setMass(def.stats.weight * 1.25),
+        rb
+      )
+      return rb
+    }
+
+    function createBladeVisuals(def) {
+      const meshPack = createBeybladeMesh(def.color, def.accent, def.key)
+      scene.add(meshPack.group)
+      const bladeLight = new THREE.PointLight(new THREE.Color(def.color), 0, 8, 2)
+      scene.add(bladeLight)
+      const defenseShield = createDefenseShield(def.color, def.accent)
+      defenseShield.visible = false
+      scene.add(defenseShield)
+      const staminaOrbit = createStaminaOrbit(def.color, def.accent)
+      staminaOrbit.visible = false
+      scene.add(staminaOrbit)
+      const staminaFloorRing = new THREE.Mesh(
+        new THREE.RingGeometry(0.8, 1.26, 40),
+        new THREE.MeshBasicMaterial({
+          color: def.accent,
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      )
+      staminaFloorRing.rotation.x = -Math.PI / 2
+      staminaFloorRing.visible = false
+      scene.add(staminaFloorRing)
+      const staminaPulse = new THREE.Mesh(
+        new THREE.RingGeometry(0.54, 0.96, 40),
+        new THREE.MeshBasicMaterial({
+          color: 0xd7f0ff,
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      )
+      staminaPulse.rotation.x = -Math.PI / 2
+      staminaPulse.visible = false
+      scene.add(staminaPulse)
+      const rubberAura = createRubberAura(def.color, def.accent)
+      rubberAura.visible = false
+      scene.add(rubberAura)
+      const rubberFloorRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.78, 0.038, 8, 36),
+        new THREE.MeshBasicMaterial({
+          color: def.accent,
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      )
+      rubberFloorRing.visible = false
+      scene.add(rubberFloorRing)
+      const rubberPulse = new THREE.Mesh(
+        new THREE.TorusGeometry(0.88, 0.055, 8, 32),
+        new THREE.MeshBasicMaterial({
+          color: 0xf2d7ff,
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      )
+      rubberPulse.visible = false
+      scene.add(rubberPulse)
+      const rubberDrainParticles = createRubberDrainParticles(def.color, def.accent)
+      rubberDrainParticles.visible = false
+      scene.add(rubberDrainParticles)
+      const rubberDrainTrail = createRubberDrainTrail(0x5b168c)
+      scene.add(rubberDrainTrail)
+      const trickMirage = createTrickMirage(def.color, def.accent)
+      trickMirage.visible = false
+      scene.add(trickMirage)
+      const trickEchoes = createTrickEchoes(def.color, def.accent)
+      trickEchoes.visible = false
+      scene.add(trickEchoes)
+      const trickFlash = createTrickFlash(def.accent)
+      trickFlash.visible = false
+      scene.add(trickFlash)
+      const defenseShieldBurst = new THREE.Mesh(
+        new THREE.RingGeometry(0.92, 1.34, 28),
+        new THREE.MeshBasicMaterial({
+          color: def.accent,
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      )
+      defenseShieldBurst.rotation.x = -Math.PI / 2
+      defenseShieldBurst.visible = false
+      scene.add(defenseShieldBurst)
+      const arrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0), 2.2, new THREE.Color(def.color), 0.55, 0.28)
+      scene.add(arrow)
+      const lockRing = createCornerMarker(3.05, 0.9, 0.2, 0xff7a18)
+      lockRing.visible = false
+      scene.add(lockRing)
+      const lockRingOuter = createCornerMarker(4.05, 1.08, 0.24, 0xffe066)
+      lockRingOuter.visible = false
+      scene.add(lockRingOuter)
+      const lockFlash = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.7, 1.7),
+        new THREE.MeshBasicMaterial({ color: 0xffc14d, transparent: true, opacity: 0, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false })
+      )
+      lockFlash.rotation.x = -Math.PI / 2
+      lockFlash.renderOrder = ATTACK_UI_RENDER_ORDER
+      lockFlash.visible = false
+      scene.add(lockFlash)
+      const lockBeamGeometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()])
+      const lockBeam = new THREE.Line(
+        lockBeamGeometry,
+        new THREE.LineBasicMaterial({ color: 0xfff2a8, transparent: true, opacity: 0, depthTest: false, depthWrite: false })
+      )
+      lockBeam.renderOrder = ATTACK_UI_RENDER_ORDER
+      lockBeam.visible = false
+      scene.add(lockBeam)
+      const lockSlash = createAttackSlash(0xfff3bf)
+      lockSlash.visible = false
+      scene.add(lockSlash)
+      return {
+        mesh: meshPack.group,
+        aura: meshPack.aura,
+        bladeLight,
+        defenseShield,
+        staminaOrbit,
+        staminaFloorRing,
+        staminaPulse,
+        rubberAura,
+        rubberFloorRing,
+        rubberPulse,
+        rubberDrainParticles,
+        rubberDrainTrail,
+        trickMirage,
+        trickEchoes,
+        trickFlash,
+        defenseShieldBurst,
+        arrow,
+        lockRing,
+        lockRingOuter,
+        lockFlash,
+        lockBeam,
+        lockSlash,
+      }
+    }
+
+    function removeBladeVisuals(blade) {
+      hideBladeEffects(blade)
+      for (const key of ['mesh', 'bladeLight', 'defenseShield', 'staminaOrbit', 'staminaFloorRing', 'staminaPulse', 'rubberAura', 'rubberFloorRing', 'rubberPulse', 'rubberDrainParticles', 'rubberDrainTrail', 'trickMirage', 'trickEchoes', 'trickFlash', 'defenseShieldBurst', 'arrow', 'lockRing', 'lockRingOuter', 'lockFlash', 'lockBeam', 'lockSlash']) {
+        const object = blade[key]
+        if (!object) continue
+        scene.remove(object)
+        disposeSceneObject(object)
+      }
+    }
+
+    function applyParticipantProfileToBlade(blade, participant) {
+      const loadout = normalizeLoadout(participant.loadout || participant.build)
+      const nextDef = buildResolvedBlade(loadout)
+      const hasChanged = blade.key !== nextDef.key
+        || blade.loadout?.disc !== loadout.disc
+        || blade.loadout?.driver !== loadout.driver
+        || blade.loadout?.layer !== loadout.layer
+
+      blade.name = participant.name
+      blade.key = nextDef.key
+      blade.loadout = loadout
+      blade.def = nextDef
+
+      if (!hasChanged) {
+        if (blade.id === runtimeState.localPlayerId) runtimeState.localBuildKey = nextDef.key
+        return
+      }
+
+      removeBladeVisuals(blade)
+      if (blade.rb) {
+        world.removeRigidBody(blade.rb)
+      }
+      Object.assign(blade, createBladeVisuals(nextDef))
+      blade.rb = createBladeBody(blade.spawn, nextDef)
+      blade.trickEchoCursor = 0
+      if (blade.id === runtimeState.localPlayerId) runtimeState.localBuildKey = nextDef.key
+      setBladeArrow(blade)
+      updateAttackLockVisual(blade)
+      syncMesh(blade, runtimeState)
+    }
+
+    function syncRuntimeParticipantsFromRoom(runtimeState) {
+      const roomPlayers = roomApi?.room?.value?.players || []
+      if (!runtimeState.networked || !roomPlayers.length) return
+      for (const roomPlayer of roomPlayers) {
+        if (roomPlayer.pendingJoin || runtimeState.bladesById.has(roomPlayer.id)) continue
+        const participant = {
+          id: roomPlayer.id,
+          name: roomPlayer.name,
+          build: roomPlayer.loadout?.layer || roomPlayer.build,
+          loadout: normalizeLoadout(roomPlayer.loadout || roomPlayer.build),
+          kind: 'human',
+        }
+        runtimeState.participants.push(participant)
+        runtimeState.scores[participant.id] = runtimeState.scores[participant.id] || 0
+        const blade = createBlade(participant, runtimeState.participants.length - 1)
+        blade.alive = false
+        blade.spin = 0
+        blade.special = 12
+        blade.wobble = 0.02
+        hideBladeEffects(blade)
+      }
+      refreshSpawnAssignments()
+      const playersById = new Map(roomPlayers.map((player) => [player.id, player]))
+      for (const participant of runtimeState.participants) {
+        const roomPlayer = playersById.get(participant.id)
+        if (!roomPlayer) continue
+        participant.name = roomPlayer.name
+        participant.build = roomPlayer.loadout?.layer || roomPlayer.build
+        participant.loadout = normalizeLoadout(roomPlayer.loadout || roomPlayer.build)
+        const blade = runtimeState.bladesById.get(participant.id)
+        if (blade) applyParticipantProfileToBlade(blade, participant)
+      }
+    }
 
     function createBlade(participant, index) {
       const loadout = normalizeLoadout(participant.loadout || participant.build)
@@ -2660,19 +3068,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       scene.add(lockSlash)
 
       const spawn = spawnPoints[index]
-      const rb = world.createRigidBody(
-        RigidBodyDesc.dynamic()
-          .setTranslation(spawn.x, 0.22, spawn.z)
-          .setCanSleep(false)
-          .lockTranslations()
-      )
-      world.createCollider(
-        ColliderDesc.cylinder(0.18, 0.78)
-          .setRestitution(0.92)
-          .setFriction(0.06)
-          .setMass(def.stats.weight * 1.25),
-        rb
-      )
+      const rb = createBladeBody(spawn, def)
 
       const blade = {
         id: participant.id,
@@ -2758,6 +3154,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       }
       blades.push(blade)
       bladesById.set(participant.id, blade)
+      return blade
     }
 
     config.participants.forEach(createBlade)
@@ -2779,7 +3176,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       matchStatKey: config.type.startsWith('online') ? 'player' : 'cpu',
       scores: Object.fromEntries(config.participants.map((participant) => [participant.id, 0])),
       round: 1,
-      lastRecordedRound: 0,
+      lastRecordedRound: config.initialRecordedRound || 0,
+      lastMatchRecordedRound: config.initialRecordedRound || 0,
+      intermissionTimer: 0,
       phase: 'aiming',
       roundResolved: false,
       matchOver: false,
@@ -2791,11 +3190,13 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       remoteInputs: new Map(),
       snapshotAccumulator: 0,
       sendInputAccumulator: 0,
+      localLaunchCommitSent: false,
       countdownTimer: 3.5,
       nextCountdownIndex: 0,
       countdownBeats: [3.5, 2.5, 1.5, 0.6],
       countdownValues: [3, 2, 1, 0],
       cameraShake: 0,
+      remoteLaunchCommits: new Map(),
       cleanupFns: [],
       recordCommitted: false,
     }
@@ -2911,14 +3312,21 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     }
 
     function resetRound() {
+      syncRuntimeParticipantsFromRoom(runtimeState)
       runtimeState.roundResolved = false
       runtimeState.phase = 'aiming'
+      runtimeState.intermissionTimer = 0
       runtimeState.fightElapsed = 0
       runtimeState.countdownTimer = AIM_COUNTDOWN_DURATION
       runtimeState.nextCountdownIndex = 0
+      runtimeState.remoteLaunchCommits.clear()
+      runtimeState.localLaunchCommitSent = false
       countdown.value = 3
       roundResult.value = null
-      status.value = runtimeState.authoritative ? 'Hold SPACE to charge, release before GO, aim with A / D, set spin with W / S.' : 'Waiting for host launch.'
+      updateSessionIntermissionState(runtimeState)
+      status.value = runtimeState.authoritative
+        ? 'Hold SPACE to charge, release before GO, aim with A / D, set spin with W / S.'
+        : 'Hold SPACE to charge, release before GO. Your launch locks locally and syncs to the host.'
       for (const blade of runtimeState.blades) {
         blade.rb.setTranslation({ x: blade.spawn.x, y: 0.22, z: blade.spawn.z }, true)
         blade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
@@ -3025,21 +3433,29 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       const defeated = runtimeState.blades.filter((blade) => blade.id !== winnerBlade.id).sort((a, b) => b.spin - a.spin)[0] || winnerBlade
       const winType = defeated.deathType === 'ring_out' ? 'Ring Out' : 'Spin Out'
       const winnerLabel = winnerBlade.isLocal && !runtimeState.networked ? 'You Win' : `${winnerBlade.name} Wins`
+      const matchComplete = isMatchComplete(runtimeState, winnerBlade.id)
       roundResult.value = {
         type: winType,
         outcome: winnerLabel,
         winner: winnerBlade.id,
-        isMatchOver: runtimeState.scores[winnerBlade.id] >= runtimeState.scoreToWin,
+        isMatchOver: matchComplete,
       }
       status.value = `${winnerBlade.name} takes round ${runtimeState.round}.`
       const localBlade = runtimeState.bladesById.get(runtimeState.localPlayerId)
       commitRoundStats(runtimeState, winnerBlade.id, winType, localBlade?.deathType)
+      commitOnlineRoundRecord(runtimeState, winnerBlade.id)
       updateHud(runtimeState)
-      runtimeState.matchOver = runtimeState.scores[winnerBlade.id] >= runtimeState.scoreToWin
+      runtimeState.matchOver = matchComplete
       if (runtimeState.matchOver) {
         commitMatchRecord(runtimeState, winnerBlade.id)
       }
+      runtimeState.phase = runtimeState.networked && !runtimeState.matchOver ? 'session_intermission' : 'round_end'
+      runtimeState.intermissionTimer = runtimeState.phase === 'session_intermission' ? ONLINE_SESSION_INTERMISSION_DURATION : 0
       runtimeState.roundResetTimer = runtimeState.matchOver ? 3 : 2.2
+      if (runtimeState.phase === 'session_intermission' && runtimeState.authoritative && roomApi) {
+        roomApi.admitPendingPlayers()
+      }
+      updateSessionIntermissionState(runtimeState)
     }
 
     function onResize() {
@@ -3089,7 +3505,16 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
             } else if (blade.id === runtimeState.localPlayerId) {
               applyHumanInput(blade, runtimeState.localInput, dt, 'aiming', runtimeState)
             } else {
-              applyHumanInput(blade, runtimeState.remoteInputs.get(blade.id) || {}, dt, 'aiming', runtimeState)
+              if (!blade.launchLocked) {
+                const pendingLaunchCommit = runtimeState.remoteLaunchCommits.get(blade.id)
+                if (pendingLaunchCommit) {
+                  applyLaunchCommit(blade, pendingLaunchCommit, runtimeState)
+                  runtimeState.remoteLaunchCommits.delete(blade.id)
+                }
+              }
+              if (!blade.launchLocked) {
+                applyHumanInput(blade, runtimeState.remoteInputs.get(blade.id) || {}, dt, 'aiming', runtimeState)
+              }
             }
             setBladeArrow(blade)
           }
@@ -3114,6 +3539,19 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
           }
           if (runtimeState.blades.filter((blade) => blade.alive).length <= 1) {
             resolveRound()
+          }
+        } else if (runtimeState.phase === 'session_intermission') {
+          syncRuntimeParticipantsFromRoom(runtimeState)
+          for (const blade of runtimeState.blades) {
+            updateBlade(blade, dt, runtimeState)
+            updateAttackLockVisual(blade)
+          }
+          runtimeState.intermissionTimer = Math.max(0, runtimeState.intermissionTimer - dt)
+          updateSessionIntermissionState(runtimeState)
+          status.value = `Next round in ${Math.max(1, Math.ceil(runtimeState.intermissionTimer))}. Choose your blade.`
+          if (runtimeState.intermissionTimer <= 0) {
+            runtimeState.round += 1
+            resetRound()
           }
         } else if (runtimeState.phase === 'round_end') {
           for (const blade of runtimeState.blades) {
@@ -3144,10 +3582,24 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
           runtimeState.sendInputAccumulator = 0
           roomApi.sendInput(runtimeState.localInput)
         }
+        syncRuntimeParticipantsFromRoom(runtimeState)
         if (roomApi?.latestSnapshot?.value) {
           applySnapshot(runtimeState, roomApi.latestSnapshot.value)
         }
+        if (runtimeState.phase === 'aiming') {
+          const localBlade = runtimeState.bladesById.get(runtimeState.localPlayerId)
+          if (localBlade) {
+            applyHumanInput(localBlade, runtimeState.localInput, dt, 'aiming', runtimeState)
+            if (localBlade.launchLocked && !runtimeState.localLaunchCommitSent && roomApi) {
+              roomApi.sendLaunchCommit(serialiseLaunchCommit(localBlade))
+              runtimeState.localLaunchCommitSent = true
+            }
+          }
+        }
         for (const blade of runtimeState.blades) {
+          if (runtimeState.phase === 'aiming') {
+            setBladeArrow(blade)
+          }
           updateAttackLockVisual(blade)
         }
       }
@@ -3186,11 +3638,17 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
   function launchOnlineMatch(matchConfig) {
     if (!roomApi) return
+    const latestSnapshot = roomApi.latestSnapshot.value
+    const localWasInSnapshot = latestSnapshot?.players?.some((player) => player.id === roomApi.clientId.value)
+    const initialRecordedRound = latestSnapshot?.roundResult && !localWasInSnapshot
+      ? latestSnapshot.round || 0
+      : 0
     gamePhase.value = 'battle'
     beginMatch({
       type: roomApi.isHost.value ? 'online-host' : 'online-client',
       localPlayerId: roomApi.clientId.value,
-      scoreToWin: matchConfig.scoreToWin || 2,
+      scoreToWin: matchConfig.scoreToWin,
+      initialRecordedRound,
       participants: matchConfig.participants.map((participant) => ({
         ...participant,
         loadout: normalizeLoadout(participant.loadout || participant.build),
@@ -3221,6 +3679,11 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       if (!payload || !runtime || !runtime.authoritative) return
       runtime.remoteInputs.set(payload.playerId, serialiseInput(payload.input))
     })
+
+    watch(() => roomApi.remoteLaunchCommit.value, (payload) => {
+      if (!payload || !runtime || !runtime.authoritative) return
+      runtime.remoteLaunchCommits.set(payload.playerId, normalizeLaunchCommit(payload.launch))
+    })
   }
 
   onUnmounted(() => {
@@ -3241,6 +3704,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     scoreboard,
     hudPlayers,
     buildEntries,
+    sessionIntermission,
     discEntries,
     driverEntries,
     roundResult,

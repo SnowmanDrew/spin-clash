@@ -68,6 +68,7 @@ export function useRoomConnection() {
   const latestSnapshot = ref(null)
   const latestMatchConfig = ref(null)
   const remoteInput = ref(null)
+  const remoteLaunchCommit = ref(null)
 
   function normalizePlayerName(name) {
     return String(name || '').trim() || 'Blader'
@@ -98,6 +99,8 @@ export function useRoomConnection() {
       room.value = null
       latestSnapshot.value = null
       latestMatchConfig.value = null
+      remoteInput.value = null
+      remoteLaunchCommit.value = null
     })
 
     nextSocket.addEventListener('message', (event) => {
@@ -126,6 +129,8 @@ export function useRoomConnection() {
             scoreToWin: message.scoreToWin,
           }
           latestSnapshot.value = null
+          remoteInput.value = null
+          remoteLaunchCommit.value = null
           break
         case 'match_snapshot':
           latestSnapshot.value = message.snapshot
@@ -137,11 +142,19 @@ export function useRoomConnection() {
             sentAt: message.sentAt || Date.now(),
           }
           break
+        case 'launch_commit':
+          remoteLaunchCommit.value = {
+            playerId: message.playerId,
+            launch: message.launch || {},
+            sentAt: message.sentAt || Date.now(),
+          }
+          break
         case 'left_room':
           room.value = null
           latestSnapshot.value = null
           latestMatchConfig.value = null
           remoteInput.value = null
+          remoteLaunchCommit.value = null
           syncRoomUrl('')
           break
         case 'error_message':
@@ -214,6 +227,10 @@ export function useRoomConnection() {
     send('start_match')
   }
 
+  function admitPendingPlayers() {
+    send('admit_pending_players')
+  }
+
   function leaveRoom() {
     send('leave_room')
     room.value = null
@@ -228,6 +245,10 @@ export function useRoomConnection() {
 
   function sendSnapshot(snapshot) {
     send('snapshot', { snapshot })
+  }
+
+  function sendLaunchCommit(launch) {
+    send('launch_commit', { launch })
   }
 
   function sendMatchComplete(statusText, summary = null) {
@@ -261,15 +282,18 @@ export function useRoomConnection() {
     latestSnapshot,
     latestMatchConfig,
     remoteInput,
+    remoteLaunchCommit,
     ensureConnected,
     connectAndCreateRoom,
     connectAndJoinRoom,
     updateProfile,
     setReady,
     startMatch,
+    admitPendingPlayers,
     leaveRoom,
     sendInput,
     sendSnapshot,
+    sendLaunchCommit,
     sendMatchComplete,
   }
 }

@@ -180,6 +180,7 @@ export function getLoadoutKey(loadout) {
 export function buildResolvedBlade(loadout) {
   const normalized = normalizeLoadout(loadout)
   const layer = BUILD_DEFS[normalized.layer]
+  const layerPhysics = layer.physics || {}
   const disc = DISC_DEFS[normalized.disc]
   const driver = DRIVER_DEFS[normalized.driver]
   const stats = {}
@@ -202,11 +203,11 @@ export function buildResolvedBlade(loadout) {
       collisionPushScale: (disc.physics.collisionPushScale || 1) * (driver.physics.collisionPushScale || 1),
       collisionSpinLossScale: (disc.physics.collisionSpinLossScale || 1) * (driver.physics.collisionSpinLossScale || 1),
       ringOutResist: (disc.physics.ringOutResist || 1) * (driver.physics.ringOutResist || 1),
-      passiveDrainMultiplier: (disc.physics.passiveDrainMultiplier || 1) * (driver.physics.passiveDrainMultiplier || 1),
+      passiveDrainMultiplier: (layerPhysics.passiveDrainMultiplier || 1) * (disc.physics.passiveDrainMultiplier || 1) * (driver.physics.passiveDrainMultiplier || 1),
       wobbleGainMultiplier: (disc.physics.wobbleGainMultiplier || 1) * (driver.physics.wobbleGainMultiplier || 1),
       wobbleRecoveryMultiplier: driver.physics.wobbleRecoveryMultiplier || 1,
       launchPowerScale: (disc.physics.launchPowerScale || 1) * (driver.physics.launchPowerScale || 1),
-      launchSpinScale: driver.physics.launchSpinScale || 1,
+      launchSpinScale: (layerPhysics.launchSpinScale || 1) * (driver.physics.launchSpinScale || 1),
       launchStability: (disc.physics.launchStability || 1) * (driver.physics.launchStability || 1),
       chargeRate: driver.physics.chargeRate || 1,
       burstScale: driver.physics.burstScale || 1,

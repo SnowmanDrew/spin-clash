@@ -24,6 +24,7 @@ const {
   scoreboard,
   hudPlayers,
   buildEntries,
+  sessionIntermission,
   roundResult,
   countdown,
   launchBadges,
@@ -69,6 +70,7 @@ watch(() => roomApi.room.value?.matchActive, (matchActive) => {
 
 const roomPlayers = computed(() => roomApi.room.value?.players || [])
 const roomId = computed(() => roomApi.roomId.value)
+const roomStatus = computed(() => roomApi.room.value?.statusText || '')
 const shareUrl = computed(() => roomApi.shareUrl.value)
 const roomError = computed(() => roomApi.errorMessage.value)
 const isHost = computed(() => roomApi.isHost.value)
@@ -82,7 +84,7 @@ const connectionLabel = computed(() => {
   if (roomApi.connectionState.value === 'error') return 'Server Unreachable'
   return 'Offline'
 })
-const modeLabel = computed(() => menuMode.value === 'online' ? 'Online Room' : 'Single Player')
+const modeLabel = computed(() => menuMode.value === 'online' ? 'Online Session' : 'Single Player')
 
 const controlsList = [
   ['A / D', 'Aim before launch'],
@@ -117,6 +119,13 @@ function resolvePlayerAlias(name = playerAlias.value) {
 function getRecordLine(record, matchType) {
   const stats = record?.[matchType] || { wins: 0, losses: 0 }
   return `${stats.wins}W-${stats.losses}L`
+}
+
+function getRoomPlayerStatus(player) {
+  if (player?.pendingJoin) return 'Next Round'
+  if (player?.ready) return 'Ready'
+  if (roomApi.room.value?.matchActive) return 'In Session'
+  return 'Waiting'
 }
 
 const activeRecordLabel = computed(() => menuMode.value === 'online' ? 'VS Player' : 'VS CPU')
@@ -320,7 +329,7 @@ function launchSingle() {
 
 function exitBattle() {
   if (menuMode.value === 'online' && isHost.value) {
-    roomApi.sendMatchComplete('Match cancelled.')
+    roomApi.sendMatchComplete('Session ended.')
   }
   returnToMenu()
 }
@@ -511,7 +520,32 @@ onUnmounted(() => {
         </TransitionGroup>
 
         <Transition name="cb-result">
-          <div v-if="roundResult" class="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
+          <div v-if="sessionIntermission.active" class="absolute inset-0 z-30 flex items-center justify-center bg-black/45 px-6">
+            <div class="session-intermission-card pointer-events-auto">
+              <div class="text-[8px] uppercase tracking-[0.58em] text-white/38">Session Break</div>
+              <div class="mt-2 text-[clamp(1.8rem,3vw,2.5rem)] font-black uppercase tracking-[0.08em] text-[#FFE500]">Next Round In {{ sessionIntermission.seconds }}</div>
+              <div class="mt-2 text-[11px] uppercase tracking-[0.22em] text-white/46">Pick a new blade or keep your current one</div>
+
+              <div class="mt-4 grid grid-cols-5 gap-2">
+                <button
+                  v-for="build in buildEntries"
+                  :key="`intermission-${build.key}`"
+                  class="session-blade-btn"
+                  :class="{ 'is-selected': selectedBuild === build.key }"
+                  :style="selectedBuild === build.key ? { borderColor: build.color, boxShadow: `inset 0 0 18px ${build.color}22, 0 0 0 1px ${build.color}18` } : { borderColor: 'rgba(255,255,255,0.08)' }"
+                  @click="selectedBuild = build.key"
+                >
+                  <div class="w-3 h-3" :style="{ background: build.color, clipPath: 'polygon(50% 0,100% 50%,50% 100%,0 50%)' }" />
+                  <span class="font-black uppercase tracking-[0.14em] text-[10px]">{{ build.name }}</span>
+                  <span class="text-[8px] uppercase tracking-[0.22em]" :style="selectedBuild === build.key ? { color: build.color } : { color: 'rgba(255,255,255,0.34)' }">{{ selectedBuild === build.key ? 'Next Up' : build.specialName }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </Transition>
+
+        <Transition name="cb-result">
+          <div v-if="roundResult && !sessionIntermission.active" class="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
             <div class="cb-result-card text-center">
               <div class="text-[8px] uppercase tracking-[0.6em] text-white/40 mb-2">{{ roundResult.isMatchOver ? 'Match Over' : 'Round Over' }}</div>
               <div class="text-[clamp(2rem,4vw,3rem)] font-black uppercase leading-none tracking-tight mb-2 text-[#00E5FF]">{{ roundResult.type }}</div>
@@ -626,7 +660,7 @@ onUnmounted(() => {
                 </button>
                 <button class="cb-mode-btn" :class="{ 'is-active': menuMode === 'online' }" @click="menuMode = 'online'">
                   <Radio class="w-4 h-4" />
-                  <span>Online Room</span>
+                  <span>Online Session</span>
                 </button>
               </div>
 
@@ -683,7 +717,7 @@ onUnmounted(() => {
 
                   <template v-else>
                     <template v-if="!roomId">
-                      <p class="text-[12px] text-white/45 leading-relaxed mb-4">Create a room, share the link, and run a free-for-all for up to four players.</p>
+                      <p class="text-[12px] text-white/45 leading-relaxed mb-4">Create a room, share the link, and run an endless free-for-all session for up to four players.</p>
                       <div class="grid grid-cols-[1fr_auto] gap-2 mb-3">
                         <input v-model="joinCode" maxlength="12" class="cb-input uppercase" placeholder="Room Code" />
                         <button class="cb-chip cb-chip-cta" :disabled="!joinCode.trim()" @click="joinRoom">
@@ -691,7 +725,7 @@ onUnmounted(() => {
                           Join
                         </button>
                       </div>
-                      <button class="cb-btn-launch" @click="createRoom">Create Room</button>
+                      <button class="cb-btn-launch" @click="createRoom">Create Session</button>
                     </template>
 
                     <template v-else>
@@ -709,9 +743,10 @@ onUnmounted(() => {
 
                         <div class="cb-lobby-box">
                           <div class="flex items-center justify-between gap-3 mb-2">
-                            <span class="cb-label">Lobby</span>
+                            <span class="cb-label">Session Lobby</span>
                             <span class="text-[10px] uppercase tracking-[0.3em]" :class="isHost ? 'text-[#FFE500]' : 'text-white/35'">{{ isHost ? 'Host' : 'Guest' }}</span>
                           </div>
+                          <div v-if="roomStatus" class="mb-2 text-[10px] uppercase tracking-[0.18em] text-white/28">{{ roomStatus }}</div>
                           <div class="grid gap-2">
                             <div v-for="slot in 4" :key="slot" class="cb-slot">
                               <template v-if="roomPlayers[slot - 1]">
@@ -725,7 +760,7 @@ onUnmounted(() => {
                                     PVP {{ getRecordLine(roomPlayers[slot - 1].record, 'player') }}
                                   </div>
                                 </div>
-                                <span class="text-[9px] uppercase tracking-[0.25em]" :class="roomPlayers[slot - 1].ready ? 'text-[#FFE500]' : 'text-white/30'">{{ roomPlayers[slot - 1].ready ? 'Ready' : 'Waiting' }}</span>
+                                <span class="text-[9px] uppercase tracking-[0.25em]" :class="roomPlayers[slot - 1].pendingJoin || roomPlayers[slot - 1].ready ? 'text-[#FFE500]' : 'text-white/30'">{{ getRoomPlayerStatus(roomPlayers[slot - 1]) }}</span>
                               </template>
                               <template v-else>
                                 <span class="text-[10px] uppercase tracking-[0.3em] text-white/25">Open Slot</span>
@@ -736,7 +771,7 @@ onUnmounted(() => {
 
                         <div class="grid grid-cols-3 gap-2">
                           <button class="cb-chip cb-chip-cta" :disabled="!localRoomPlayer" @click="toggleReady">{{ localRoomPlayer?.ready ? 'Unready' : 'Ready Up' }}</button>
-                          <button class="cb-chip cb-chip-cta" :disabled="!canStartRoomMatch" @click="startRoomMatch">Start Match</button>
+                          <button class="cb-chip cb-chip-cta" :disabled="!canStartRoomMatch" @click="startRoomMatch">Start Session</button>
                           <button class="cb-chip cb-chip-interactive" @click="leaveRoom">Leave</button>
                         </div>
                       </div>
@@ -1193,6 +1228,39 @@ onUnmounted(() => {
   clip-path: polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
   backdrop-filter: blur(12px);
   transform: translate(-50%, calc(-100% - 18px));
+}
+
+.session-intermission-card {
+  width: min(760px, calc(100% - 2rem));
+  padding: 22px 24px;
+  text-align: center;
+  background: linear-gradient(180deg, rgba(8, 8, 12, 0.98) 0%, rgba(5, 5, 10, 0.96) 100%);
+  border: 1px solid rgba(255,255,255,0.08);
+  clip-path: polygon(14px 0, 100% 0, calc(100% - 14px) 100%, 0 100%);
+  box-shadow: 0 0 0 1px rgba(255,229,0,0.08), 0 24px 60px rgba(0,0,0,0.42);
+  backdrop-filter: blur(16px);
+}
+
+.session-blade-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-height: 102px;
+  padding: 10px 8px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+  clip-path: polygon(8px 0, 100% 0, calc(100% - 8px) 100%, 0 100%);
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.session-blade-btn:hover {
+  transform: translateY(-1px);
+  background: rgba(255,255,255,0.045);
+}
+
+.session-blade-btn.is-selected {
+  background: rgba(255,255,255,0.06);
 }
 
 .cb-ring-field {
