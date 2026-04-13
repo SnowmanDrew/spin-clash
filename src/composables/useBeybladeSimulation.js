@@ -1,6 +1,7 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { BUILD_DEFS, CPU_BUILD_ORDER } from '../data/buildDefs.js'
+import { buildResolvedBlade, createDefaultLoadout, getDiscEntries, getDriverEntries, normalizeLoadout } from '../data/partDefs.js'
 import { createBeybladeMesh } from '../models/beyblades/index.js'
 import { useAudio } from './useAudio.js'
 
@@ -24,6 +25,38 @@ const STADIUM = {
 
 const AIM_COUNTDOWN_DURATION = 3.5
 
+const LAUNCH_TIMING = {
+  idealRelease: 0.18,
+  perfectWindow: 0.1,
+  goodWindow: 0.34,
+  chargeSweetSpot: 0.84,
+  chargeWindow: 0.36,
+  minCharge: 0.14,
+  forcedPenalty: 0.58,
+}
+
+const OPENING_CLASH = {
+  duration: 1.05,
+  basePushScale: 0.42,
+  earnedAdvantageBonus: 0.1,
+  perfectPunishBonus: 0.28,
+  maxPushScale: 0.92,
+  nonPerfectCap: 0.68,
+}
+
+const SPIN_DRAIN = {
+  passiveScale: 0.68,
+  collisionScale: 0.76,
+}
+
+const LAUNCH_TIMING_PROFILES = {
+  attack: { idealRelease: 0.16, perfectWindow: 0.085, goodWindow: 0.3 },
+  defense: { idealRelease: 0.2, perfectWindow: 0.12, goodWindow: 0.39 },
+  stamina: { idealRelease: 0.19, perfectWindow: 0.11, goodWindow: 0.36 },
+  rubber: { idealRelease: 0.17, perfectWindow: 0.095, goodWindow: 0.32 },
+  trick: { idealRelease: 0.155, perfectWindow: 0.09, goodWindow: 0.31 },
+}
+
 const ATTACK_SPECIAL = {
   lockDuration: 0.42,
   rushDuration: 0.34,
@@ -39,7 +72,7 @@ const ATTACK_SPECIAL = {
 }
 
 const DEFENSE_SPECIAL = {
-  guardDuration: 1.95,
+  guardDuration: 0.75,
   wobbleScale: 0.3,
   passiveDrainMultiplier: 0.76,
   defenseMultiplier: 1.62,
@@ -49,6 +82,8 @@ const DEFENSE_SPECIAL = {
   reflectSpinImpactScale: 0.18,
   guardedPushAbsorb: 0.82,
   guardedSpinAbsorb: 0.72,
+  rushReboundPushBonus: 1.35,
+  rushReflectSpinScale: 0.22,
   reflectFlashDuration: 0.2,
 }
 
@@ -129,6 +164,7 @@ const tmpWobbleQuatA = new THREE.Quaternion()
 const tmpWobbleQuatB = new THREE.Quaternion()
 const tmpTumbleQuat = new THREE.Quaternion()
 const tmpTumbleAxis = new THREE.Vector3()
+const tmpScreenPos = new THREE.Vector3()
 
 function clamp01(value) {
   return Math.min(1, Math.max(0, value))
@@ -695,6 +731,9 @@ function serialiseInput(input) {
     aimLeft: Boolean(input.aimLeft),
     aimRight: Boolean(input.aimRight),
     charge: Boolean(input.charge),
+    releaseLaunch: Boolean(input.releaseLaunch),
+    spinCW: Boolean(input.spinCW),
+    spinCCW: Boolean(input.spinCCW),
     moveX: Math.max(-1, Math.min(1, Number(input.moveX || 0))),
     moveZ: Math.max(-1, Math.min(1, Number(input.moveZ || 0))),
     burst: Boolean(input.burst),
@@ -709,8 +748,108 @@ function getBladeTarget(runtimeState, blade) {
 
 function rollCpuLaunchProfile(blade) {
   const profile = CPU_LAUNCH.buildProfiles[blade.key] || CPU_LAUNCH
+  const timingProfile = getBladeLaunchTimingProfile(blade)
   blade.cpuLaunchCharge = clamp01(profile.baseCharge + (Math.random() * 2 - 1) * profile.chargeVariance)
   blade.cpuLaunchAngle = blade.spawn.angle + (Math.random() * 2 - 1) * profile.angleVariance
+  const missChance = blade.key === 'stamina' ? 0.08 : blade.key === 'trick' ? 0.16 : 0.12
+  if (Math.random() < missChance) {
+    blade.cpuLaunchReleaseTime = -0.08 - Math.random() * 0.1
+  } else {
+    const releaseOffset = (Math.random() * 2 - 1) * (blade.key === 'attack' ? 0.08 : blade.key === 'trick' ? 0.16 : 0.12)
+    blade.cpuLaunchReleaseTime = Math.max(0.02, timingProfile.idealRelease + releaseOffset)
+  }
+  blade.cpuSpinDir = Math.random() < 0.5 ? -1 : 1
+}
+
+function getBladeLaunchTimingProfile(bladeOrKey) {
+  const key = typeof bladeOrKey === 'string' ? bladeOrKey : bladeOrKey?.key
+  return LAUNCH_TIMING_PROFILES[key] || LAUNCH_TIMING
+}
+
+function getLaunchTimingScore(timeRemaining, forced = false, blade = null) {
+  const timingProfile = getBladeLaunchTimingProfile(blade)
+  const delta = Math.abs(timeRemaining - timingProfile.idealRelease)
+  let score = 1 - delta / timingProfile.goodWindow
+  if (delta <= timingProfile.perfectWindow) {
+    score = 0.88 + (1 - delta / timingProfile.perfectWindow) * 0.12
+  }
+  score = clamp01(score)
+  return forced ? score * LAUNCH_TIMING.forcedPenalty : score
+}
+
+function getLaunchChargeScore(charge) {
+  return clamp01(1 - Math.abs(charge - LAUNCH_TIMING.chargeSweetSpot) / LAUNCH_TIMING.chargeWindow)
+}
+
+function getLaunchGrade(score, forced = false) {
+  if (forced) return 'Forced'
+  if (score >= 0.9) return 'Perfect'
+  if (score >= 0.72) return 'Great'
+  if (score >= 0.48) return 'Good'
+  return 'Rough'
+}
+
+function getLaunchOpeningPowerScale(score, forced = false) {
+  if (forced) return mix(0.4, 0.52, score)
+  if (score < 0.48) return mix(0.52, 0.68, score / 0.48)
+  return mix(0.82, 0.98, score)
+}
+
+function getLaunchOpeningWobble(score, grade, blade) {
+  const stability = blade?.def?.physics?.launchStability || 1
+  const baseWobble = Math.max(0.01, mix(0.22, 0.018, score * stability))
+
+  if (grade === 'Forced') {
+    return Math.max(0.145, baseWobble + 0.05)
+  }
+
+  if (grade === 'Rough') {
+    return Math.max(0.095, baseWobble + 0.02)
+  }
+
+  return baseWobble
+}
+
+function getOpeningClashPushScale(attacker, defender, runtimeState) {
+  const elapsed = runtimeState?.fightElapsed || 0
+  if (elapsed >= OPENING_CLASH.duration) return 1
+
+  const progress = clamp01(elapsed / OPENING_CLASH.duration)
+  const attackerScore = attacker?.launchTimingScore || 0
+  const defenderScore = defender?.launchTimingScore || 0
+  const launchAdvantage = clamp01((attackerScore - defenderScore + 0.08) / 0.82)
+  let earlyScale = OPENING_CLASH.basePushScale + launchAdvantage * OPENING_CLASH.earnedAdvantageBonus
+
+  const attackerPerfect = attacker?.launchGrade === 'Perfect'
+  const defenderBad = defender?.launchGrade === 'Rough' || defender?.launchGrade === 'Forced'
+  const perfectPunish = attackerPerfect && defenderBad
+  if (perfectPunish) {
+    earlyScale += OPENING_CLASH.perfectPunishBonus
+  }
+
+  earlyScale = Math.min(OPENING_CLASH.maxPushScale, earlyScale)
+  if (!perfectPunish) {
+    earlyScale = Math.min(OPENING_CLASH.nonPerfectCap, earlyScale)
+  }
+  return mix(earlyScale, 1, progress)
+}
+
+function getLayerPushTraitScale(blade, sameSpin) {
+  if (blade.key === 'attack') return sameSpin ? 1.16 : 1.04
+  if (blade.key === 'defense') return sameSpin ? 0.9 : 0.96
+  if (blade.key === 'stamina') return sameSpin ? 0.92 : 1.02
+  if (blade.key === 'rubber') return sameSpin ? 0.95 : 1.06
+  if (blade.key === 'trick') return sameSpin ? 0.96 : 1.08
+  return 1
+}
+
+function getLayerSpinTraitScale(blade, sameSpin) {
+  if (blade.key === 'attack') return sameSpin ? 1.04 : 1.12
+  if (blade.key === 'defense') return sameSpin ? 0.88 : 0.95
+  if (blade.key === 'stamina') return sameSpin ? 0.84 : 0.9
+  if (blade.key === 'rubber') return sameSpin ? 0.94 : 0.78
+  if (blade.key === 'trick') return sameSpin ? 0.96 : 0.82
+  return 1
 }
 
 function createEmptyPlayerRecord() {
@@ -811,14 +950,19 @@ function normalizeFinishStatKey(value) {
 }
 
 function loadStoredBuild() {
-  if (typeof window === 'undefined') return 'attack'
+  if (typeof window === 'undefined') return createDefaultLoadout()
   const storedBuild = window.localStorage.getItem(SELECTED_BUILD_STORAGE_KEY)
-  return storedBuild && BUILD_DEFS[storedBuild] ? storedBuild : 'attack'
+  if (!storedBuild) return createDefaultLoadout()
+  try {
+    return normalizeLoadout(JSON.parse(storedBuild))
+  } catch {
+    return normalizeLoadout(storedBuild)
+  }
 }
 
 function storeSelectedBuild(build) {
   if (typeof window === 'undefined') return
-  window.localStorage.setItem(SELECTED_BUILD_STORAGE_KEY, build)
+  window.localStorage.setItem(SELECTED_BUILD_STORAGE_KEY, JSON.stringify(normalizeLoadout(build)))
 }
 
 function loadStoredPlayerRecord() {
@@ -853,8 +997,16 @@ function storePlayerStats(stats) {
 
 export function useBeybladeSimulation(mountRef, roomApi = null) {
   const { beep, noiseBurst } = useAudio()
+  const initialLoadout = loadStoredBuild()
 
-  const selectedBuild = ref(loadStoredBuild())
+  const selectedBuild = ref(initialLoadout.layer)
+  const selectedDisc = ref(initialLoadout.disc)
+  const selectedDriver = ref(initialLoadout.driver)
+  const selectedLoadout = computed(() => normalizeLoadout({
+    layer: selectedBuild.value,
+    disc: selectedDisc.value,
+    driver: selectedDriver.value,
+  }))
   const playerRecord = ref(loadStoredPlayerRecord())
   const playerStats = ref(loadStoredPlayerStats())
   const menuMode = ref('single')
@@ -865,13 +1017,53 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
   const roundResult = ref(null)
   const countdown = ref(null)
   const aimAngle = ref(0)
+  const launchBadges = ref([])
+  const launchState = ref({
+    charge: 0,
+    angle: 0,
+    spinDir: 1,
+    locked: false,
+    grade: 'Unreleased',
+    timingScore: 0,
+    countdownProgress: 0,
+    idealProgress: clamp01(1 - LAUNCH_TIMING.idealRelease / AIM_COUNTDOWN_DURATION),
+    perfectWindowProgress: Math.max(0.04, LAUNCH_TIMING.perfectWindow / AIM_COUNTDOWN_DURATION),
+    chargeSweetSpot: LAUNCH_TIMING.chargeSweetSpot,
+    chargeWindow: LAUNCH_TIMING.chargeWindow,
+    forced: false,
+    screenX: 0,
+    screenY: 0,
+    screenVisible: false,
+    color: '#ffffff',
+    accent: '#FFE500',
+  })
+  const discEntries = computed(() => getDiscEntries())
+  const driverEntries = computed(() => getDriverEntries())
   const buildEntries = computed(() => Object.values(BUILD_DEFS))
 
   let runtime = null
   let cpuMatchBuildIdx = 0
   let keyCleanup = null
   const pressedKeys = new Set()
-  const queuedActions = { special: false }
+  const queuedActions = { specialFrames: 0, releaseLaunchFrames: 0, spinCWFrames: 0, spinCCWFrames: 0 }
+
+  function lockLaunchState(blade, runtimeState, forced = false) {
+    if (blade.launchLocked) return false
+    const timingScore = getLaunchTimingScore(runtimeState?.countdownTimer || 0, forced, blade)
+    const chargeScore = getLaunchChargeScore(blade.charge)
+    const finalScore = Math.max(forced ? 0.18 : 0.24, clamp01(timingScore * 0.58 + chargeScore * 0.42))
+    blade.launchLocked = true
+    blade.lockedCharge = blade.charge
+    blade.lockedLaunchAngle = blade.launchAngle
+    blade.lockedSpinDir = blade.spinDir || 1
+    blade.launchTimingScore = finalScore
+    blade.launchGrade = getLaunchGrade(finalScore, forced)
+    blade.forcedLaunch = forced
+    if (runtimeState && blade.id === runtimeState.localPlayerId) {
+      status.value = `${blade.launchGrade} launch locked.`
+    }
+    return true
+  }
 
   function updatePlayerStats(mutator) {
     const nextStats = normalizePlayerStats(playerStats.value)
@@ -889,6 +1081,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       roomApi.updateProfile({
         name: roomApi.playerName.value,
         build: selectedBuild.value,
+        loadout: selectedLoadout.value,
         record: nextRecord,
       })
     }
@@ -959,6 +1152,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         id: participant.id,
         name: participant.name,
         build: participant.build,
+        loadout: participant.loadout,
         score: runtimeState.scores[participant.id] || 0,
       })),
     }
@@ -969,13 +1163,19 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       aimLeft: pressedKeys.has('KeyA'),
       aimRight: pressedKeys.has('KeyD'),
       charge: pressedKeys.has('Space'),
+      releaseLaunch: queuedActions.releaseLaunchFrames > 0,
+      spinCW: queuedActions.spinCWFrames > 0,
+      spinCCW: queuedActions.spinCCWFrames > 0,
       moveX: (pressedKeys.has('KeyD') ? 1 : 0) - (pressedKeys.has('KeyA') ? 1 : 0),
       moveZ: (pressedKeys.has('KeyS') ? 1 : 0) - (pressedKeys.has('KeyW') ? 1 : 0),
       burst: pressedKeys.has('ShiftLeft') || pressedKeys.has('ShiftRight'),
       stabilise: pressedKeys.has('KeyE'),
-      special: queuedActions.special,
+      special: queuedActions.specialFrames > 0,
     }
-    queuedActions.special = false
+    queuedActions.specialFrames = Math.max(0, queuedActions.specialFrames - 1)
+    queuedActions.releaseLaunchFrames = Math.max(0, queuedActions.releaseLaunchFrames - 1)
+    queuedActions.spinCWFrames = Math.max(0, queuedActions.spinCWFrames - 1)
+    queuedActions.spinCCWFrames = Math.max(0, queuedActions.spinCCWFrames - 1)
     return input
   }
 
@@ -985,11 +1185,14 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     const onKeyDown = (event) => {
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) event.preventDefault()
       pressedKeys.add(event.code)
-      if (event.code === 'KeyQ') queuedActions.special = true
+      if (event.code === 'KeyQ') queuedActions.specialFrames = 4
+      if (event.code === 'KeyS' || event.code === 'ArrowDown' || event.code === 'KeyZ') queuedActions.spinCCWFrames = 4
+      if (event.code === 'KeyW' || event.code === 'ArrowUp' || event.code === 'KeyC') queuedActions.spinCWFrames = 4
     }
 
     const onKeyUp = (event) => {
       pressedKeys.delete(event.code)
+      if (event.code === 'Space') queuedActions.releaseLaunchFrames = 5
     }
 
     window.addEventListener('keydown', onKeyDown)
@@ -1015,6 +1218,8 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         special: blade ? blade.special : 0,
         alive: blade ? blade.alive : false,
         score: runtimeState.scores[participant.id] || 0,
+        spinDir: blade ? blade.spinDir : 1,
+        loadoutLabel: blade?.def?.fullName || participant.name,
       }
     })
     scoreboard.value = hudPlayers.value.map((entry) => ({
@@ -1068,9 +1273,16 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
           ultGlow: blade.ultGlow,
           visualSpin: blade.visualSpin,
           deathType: blade.deathType,
+          spinDir: blade.spinDir,
           charge: blade.charge,
           launchAngle: blade.launchAngle,
           launchPower: blade.launchPower,
+          launchLocked: blade.launchLocked,
+          lockedCharge: blade.lockedCharge,
+          lockedLaunchAngle: blade.lockedLaunchAngle,
+          lockedSpinDir: blade.lockedSpinDir,
+          launchTimingScore: blade.launchTimingScore,
+          launchGrade: blade.launchGrade,
           pos: { x: pos.x, z: pos.z },
           vel: { x: vel.x, z: vel.z },
           ringOutVisual: blade.ringOutVisual ? { ...blade.ringOutVisual } : null,
@@ -1086,14 +1298,58 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       try { fn() } catch (_) {}
     })
     if (keyCleanup) keyCleanup()
+    launchBadges.value = []
     runtime = null
   }
 
-  function syncMesh(blade) {
+  function updateLaunchScreenAnchor(blade, runtimeState, worldX, worldY, worldZ) {
+    if (!runtimeState) return
+    tmpScreenPos.set(worldX, worldY, worldZ).project(runtimeState.camera)
+    const screenVisible = tmpScreenPos.z >= -1 && tmpScreenPos.z <= 1
+      && Math.abs(tmpScreenPos.x) <= 1.15
+      && Math.abs(tmpScreenPos.y) <= 1.15
+    const badgeCharge = blade.launchLocked ? blade.lockedCharge : blade.charge
+    const badgeEntry = launchBadges.value.find((entry) => entry.id === blade.id)
+    const projectedScreenX = ((tmpScreenPos.x + 1) * 0.5) * 100
+    const projectedScreenY = ((1 - tmpScreenPos.y) * 0.5) * 100
+    const stableScreenX = screenVisible ? projectedScreenX : (badgeEntry?.stableScreenX ?? projectedScreenX)
+    const stableScreenY = screenVisible ? projectedScreenY : (badgeEntry?.stableScreenY ?? projectedScreenY)
+    const nextBadge = {
+      id: blade.id,
+      name: blade.name,
+      build: blade.key,
+      color: blade.def.color,
+      accent: blade.def.accent,
+      isLocal: blade.id === runtimeState.localPlayerId,
+      isCpu: blade.kind === 'cpu',
+      grade: blade.launchGrade,
+      powerPercent: Math.round(clamp01(badgeCharge) * 100),
+      spinDir: blade.launchLocked ? blade.lockedSpinDir : blade.spinDir,
+      screenX: projectedScreenX,
+      screenY: projectedScreenY,
+      stableScreenX,
+      stableScreenY,
+      hasStableAnchor: Boolean(badgeEntry?.hasStableAnchor || screenVisible),
+      screenVisible,
+    }
+    if (badgeEntry) Object.assign(badgeEntry, nextBadge)
+    else launchBadges.value.push(nextBadge)
+
+    if (blade.id !== runtimeState.localPlayerId) return
+    launchState.value = {
+      ...launchState.value,
+      screenX: stableScreenX,
+      screenY: stableScreenY,
+      screenVisible: screenVisible || Boolean(badgeEntry?.hasStableAnchor),
+    }
+  }
+
+  function syncMesh(blade, runtimeState = runtime) {
     if (!blade.alive && blade.ringOutVisual) {
       const fx = blade.ringOutVisual
       blade.mesh.position.set(fx.x, fx.y, fx.z)
       blade.bladeLight.position.set(fx.x, fx.y + 0.35, fx.z)
+      updateLaunchScreenAnchor(blade, runtimeState, fx.x, fx.y + 0.82, fx.z)
       return
     }
 
@@ -1112,6 +1368,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     const wobbleB = Math.cos(now * 0.024 + t.z) * blade.wobble * 0.045 * wobbleScale * wobbleScale * upperBankScale * upperBankScale
 
     blade.mesh.position.set(t.x, surfaceY + STADIUM.bladeLift, t.z)
+    updateLaunchScreenAnchor(blade, runtimeState, t.x, surfaceY + 1.22, t.z)
     tmpSurfaceNormal.set(-radialX * slope, 1, -radialZ * slope).normalize()
     tmpSpinAxis.set(-radialZ, 0, radialX).normalize()
     tmpBankAxis.crossVectors(tmpSpinAxis, tmpSurfaceNormal).normalize()
@@ -1406,7 +1663,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
   function burst(blade, powerScale = 1, aimDirection = null) {
     if (blade.boostCooldown > 0 || blade.spin < 7) return
     const lv = blade.rb.linvel()
-    const boost = 4.5 * blade.def.stats.speed * powerScale
+    const boost = 4.5 * blade.def.stats.speed * powerScale * (blade.def.physics.burstScale || 1)
     if (aimDirection) {
       const currentSpeed = Math.hypot(lv.x, lv.z)
       const carrySpeed = Math.max(boost * 0.55, currentSpeed * 0.35)
@@ -1527,10 +1784,11 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
   function stabilise(blade, dt) {
     if (blade.spin < 3) return
-    blade.spin = Math.max(0, blade.spin - 3.2 * dt)
-    blade.wobble = Math.max(0.008, blade.wobble - 1.9 * dt)
+    const stabiliseScale = blade.def.physics.stabiliseScale || 1
+    blade.spin = Math.max(0, blade.spin - 3.2 * dt / stabiliseScale)
+    blade.wobble = Math.max(0.008, blade.wobble - 1.9 * dt * stabiliseScale)
     const lv = blade.rb.linvel()
-    blade.rb.setLinvel({ x: lv.x * (1 - 0.8 * dt), y: 0, z: lv.z * (1 - 0.8 * dt) }, true)
+    blade.rb.setLinvel({ x: lv.x * (1 - 0.8 * dt * stabiliseScale), y: 0, z: lv.z * (1 - 0.8 * dt * stabiliseScale) }, true)
   }
 
   function pickNearestOpponent(runtimeState, sourceBlade) {
@@ -1573,9 +1831,12 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         startAttackRush(blade, runtimeState, ATTACK_SPECIAL.fallbackPowerScale)
       }
     } else if (blade.key === 'defense') {
+      const pos = blade.rb.translation()
       blade.guarding = DEFENSE_SPECIAL.guardDuration
+      blade.guardAnchor = { x: pos.x, z: pos.z }
       blade.wobble *= DEFENSE_SPECIAL.wobbleScale
       blade.defenseReflectFlash = DEFENSE_SPECIAL.reflectFlashDuration * 0.7
+      blade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
     } else if (blade.key === 'stamina') {
       blade.silentOrbit = STAMINA_SPECIAL.duration
       blade.silentOrbitPulse = STAMINA_SPECIAL.pulseDuration
@@ -1619,6 +1880,10 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
   function runCpuBrain(runtimeState, cpuBlade, dt) {
     if (!cpuBlade.alive || runtimeState.phase !== 'fighting') return
+    if (cpuBlade.guarding > 0) {
+      cpuBlade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
+      return
+    }
     const target = pickCpuTarget(runtimeState, cpuBlade)
     if (!target) return
 
@@ -1720,10 +1985,22 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
   function applyHumanInput(blade, input, dt, phase, runtimeState = null) {
     if (!input || !blade.alive) return
     if (phase === 'aiming') {
-      if (input.aimLeft) blade.launchAngle -= 2.2 * dt
-      if (input.aimRight) blade.launchAngle += 2.2 * dt
-      if (input.charge) blade.charge = Math.min(1, blade.charge + 0.65 * dt)
-      else blade.charge = Math.max(0, blade.charge - 0.45 * dt)
+      if (input.spinCCW) blade.spinDir = -1
+      if (input.spinCW) blade.spinDir = 1
+      if (!blade.launchLocked) {
+        if (input.aimLeft) blade.launchAngle -= 2.2 * dt
+        if (input.aimRight) blade.launchAngle += 2.2 * dt
+        if (input.charge) blade.charge = Math.min(1, blade.charge + 0.65 * dt * (blade.def.physics.chargeRate || 1))
+        else blade.charge = Math.max(0, blade.charge - 0.22 * dt)
+        if (input.releaseLaunch && blade.charge >= LAUNCH_TIMING.minCharge) {
+          lockLaunchState(blade, runtimeState)
+        }
+      }
+      return
+    }
+
+    if (blade.guarding > 0) {
+      blade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
       return
     }
 
@@ -1731,7 +2008,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     const controlScale = blade.attackCommitTimer > 0 ? 0.18 : 1
     const orbitActive = blade.silentOrbit > 0
     const phantomActive = blade.trickPhantomTimer > 0
-    const nudge = 7.6 * blade.def.stats.grip * (orbitActive ? STAMINA_SPECIAL.controlBoost : 1) * (phantomActive ? TRICK_SPECIAL.controlBoost : 1)
+    const nudge = 7.6 * blade.def.stats.grip * (blade.def.physics.controlScale || 1) * (orbitActive ? STAMINA_SPECIAL.controlBoost : 1) * (phantomActive ? TRICK_SPECIAL.controlBoost : 1)
     let nextX = lv.x + input.moveX * nudge * dt * controlScale
     let nextZ = lv.z + input.moveZ * nudge * dt * controlScale
     if (orbitActive) {
@@ -1762,6 +2039,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
   function updateBlade(blade, dt, runtimeState) {
     blade.boostCooldown = Math.max(0, blade.boostCooldown - dt)
     blade.guarding = Math.max(0, blade.guarding - dt)
+    if (blade.guarding <= 0 && blade.guardAnchor) {
+      blade.guardAnchor = null
+    }
     const hadOrbit = blade.silentOrbit > 0
     blade.silentOrbit = Math.max(0, blade.silentOrbit - dt)
     blade.silentOrbitPulse = Math.max(0, blade.silentOrbitPulse - dt)
@@ -1813,10 +2093,15 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       return
     }
 
+    if (blade.guarding > 0 && blade.guardAnchor) {
+      blade.rb.setTranslation({ x: blade.guardAnchor.x, y: 0.22, z: blade.guardAnchor.z }, true)
+      blade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
+    }
+
     const pos = blade.rb.translation()
     const lv = blade.rb.linvel()
     const radius = Math.hypot(pos.x, pos.z)
-    if (radius > STADIUM.flatRadius) {
+    if (radius > STADIUM.flatRadius && blade.guarding <= 0) {
       const slope = getStadiumSlope(radius)
       const bowlAccel = -slope * STADIUM.bankGravity
       const nx = pos.x / radius
@@ -1825,7 +2110,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     }
 
     let tunedLv = blade.rb.linvel()
-    if (blade.silentOrbit > 0 && radius > 0.001) {
+    if (blade.guarding <= 0 && blade.silentOrbit > 0 && radius > 0.001) {
       const nx = pos.x / radius
       const nz = pos.z / radius
       const inward = clamp01((radius - STAMINA_SPECIAL.recenterStartRadius) / (STADIUM.lipRadius - STAMINA_SPECIAL.recenterStartRadius))
@@ -1837,7 +2122,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       }
     }
 
-    if (blade.attackRushTimer > 0 && runtimeState) {
+    if (blade.guarding <= 0 && blade.attackRushTimer > 0 && runtimeState) {
       const target = getBladeTarget(runtimeState, blade)
       if (target?.alive) {
         const targetPos = target.rb.translation()
@@ -1862,7 +2147,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
     const speed = Math.hypot(tunedLv.x, tunedLv.z)
     const radialVel = radius > 0.001 ? (tunedLv.x * pos.x + tunedLv.z * pos.z) / radius : 0
-    if (radius > STADIUM.lipRadius && radialVel > 0.35) {
+    if (radius > STADIUM.lipRadius && radialVel > 0.35 * (blade.def.physics.ringOutResist || 1)) {
       blade.deathType = 'ring_out'
       blade.alive = false
       startRingOutVisual(blade)
@@ -1870,13 +2155,19 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
     let drain = 1.6 + speed * 0.13 + blade.wobble * 1.2
     drain /= blade.def.stats.stamina
+    drain *= blade.def.physics.passiveDrainMultiplier || 1
     if (blade.silentOrbit > 0) drain *= STAMINA_SPECIAL.passiveDrainMultiplier
     if (blade.trickPhantomTimer > 0) drain *= TRICK_SPECIAL.passiveDrainMultiplier
     if (blade.guarding > 0) drain *= DEFENSE_SPECIAL.passiveDrainMultiplier
+    drain *= SPIN_DRAIN.passiveScale
     blade.spin = Math.max(0, blade.spin - drain * dt)
     blade.special = Math.min(100, blade.special + (0.9 + speed * 0.06) * dt * 10)
-    if (blade.spin < 7) blade.wobble = Math.min(0.45, blade.wobble + 0.3 * dt)
-    else blade.wobble = Math.max(0.01, blade.wobble - 0.03 * dt)
+    const lowSpinRatio = clamp01((18 - blade.spin) / 18)
+    if (blade.spin < 18) {
+      blade.wobble = Math.min(0.52, blade.wobble + (0.06 + lowSpinRatio * 0.28) * dt * (blade.def.physics.wobbleGainMultiplier || 1))
+    } else {
+      blade.wobble = Math.max(0.01, blade.wobble - 0.04 * dt * (blade.def.physics.wobbleRecoveryMultiplier || 1))
+    }
     blade.visualSpin += blade.spin * 0.032 * blade.spinDir
     if (blade.spin <= 0.1) {
       blade.alive = false
@@ -1888,6 +2179,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.attackRushTimer = 0
       blade.attackCommitTimer = 0
       blade.attackTargetId = null
+      blade.guardAnchor = null
       blade.attackSnapTimer = 0
       blade.attackSlashTimer = 0
       blade.silentOrbitPulse = 0
@@ -1920,15 +2212,22 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     const lvb = b.rb.linvel()
     const relV = (lvb.x - lva.x) * nx + (lvb.z - lva.z) * nz
     const impact = Math.abs(relV) + Math.abs(a.spin - b.spin) * 0.055
+    const sameSpin = a.spinDir === b.spinDir
+    const oppositeSpinScale = sameSpin ? 1 : ((a.def.physics.oppositeSpinScale || 1) + (b.def.physics.oppositeSpinScale || 1)) * 0.5
     const attackModA = a.def.stats.smash * (a.smashWindow > 0 ? ATTACK_SPECIAL.smashMultiplier : 1)
     const attackModB = b.def.stats.smash * (b.smashWindow > 0 ? ATTACK_SPECIAL.smashMultiplier : 1)
     const defenseA = a.def.stats.defense * (a.guarding > 0 ? DEFENSE_SPECIAL.defenseMultiplier : 1)
     const defenseB = b.def.stats.defense * (b.guarding > 0 ? DEFENSE_SPECIAL.defenseMultiplier : 1)
-    let pushA = (1.2 + impact * 0.35) * (attackModB / defenseA)
-    let pushB = (1.2 + impact * 0.35) * (attackModA / defenseB)
+    const rushIntoGuardA = a.attackRushTimer > 0 && b.guarding > 0
+    const rushIntoGuardB = b.attackRushTimer > 0 && a.guarding > 0
+    let pushA = (1.2 + impact * 0.35) * (attackModB / defenseA) * (sameSpin ? 1.12 : 0.94) * (b.def.physics.collisionPushScale || 1) * getLayerPushTraitScale(b, sameSpin)
+    let pushB = (1.2 + impact * 0.35) * (attackModA / defenseB) * (sameSpin ? 1.12 : 0.94) * (a.def.physics.collisionPushScale || 1) * getLayerPushTraitScale(a, sameSpin)
+    pushA *= getOpeningClashPushScale(b, a, runtimeState)
+    pushB *= getOpeningClashPushScale(a, b, runtimeState)
     if (a.guarding > 0) {
       pushA *= DEFENSE_SPECIAL.guardedPushAbsorb
       pushB += DEFENSE_SPECIAL.reflectPushBonus + impact * DEFENSE_SPECIAL.reflectPushImpactScale
+      if (rushIntoGuardB) pushB += DEFENSE_SPECIAL.rushReboundPushBonus
       a.defenseReflectFlash = Math.max(a.defenseReflectFlash, DEFENSE_SPECIAL.reflectFlashDuration)
       a.ultGlow = Math.max(a.ultGlow, 0.75)
       a.lastImpact = Math.max(a.lastImpact, 0.7)
@@ -1936,6 +2235,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     if (b.guarding > 0) {
       pushB *= DEFENSE_SPECIAL.guardedPushAbsorb
       pushA += DEFENSE_SPECIAL.reflectPushBonus + impact * DEFENSE_SPECIAL.reflectPushImpactScale
+      if (rushIntoGuardA) pushA += DEFENSE_SPECIAL.rushReboundPushBonus
       b.defenseReflectFlash = Math.max(b.defenseReflectFlash, DEFENSE_SPECIAL.reflectFlashDuration)
       b.ultGlow = Math.max(b.ultGlow, 0.75)
       b.lastImpact = Math.max(b.lastImpact, 0.7)
@@ -1958,16 +2258,42 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     }
     a.rb.setLinvel({ x: lva.x - nx * pushA, y: 0, z: lva.z - nz * pushA }, true)
     b.rb.setLinvel({ x: lvb.x + nx * pushB, y: 0, z: lvb.z + nz * pushB }, true)
+    if (a.guarding > 0 && a.guardAnchor) {
+      a.rb.setTranslation({ x: a.guardAnchor.x, y: 0.22, z: a.guardAnchor.z }, true)
+      a.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
+    }
+    if (b.guarding > 0 && b.guardAnchor) {
+      b.rb.setTranslation({ x: b.guardAnchor.x, y: 0.22, z: b.guardAnchor.z }, true)
+      b.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
+    }
+    if (rushIntoGuardA) {
+      a.attackRushTimer = 0
+      a.attackCommitTimer = 0
+      a.attackLockTimer = 0
+      a.attackSnapTimer = 0
+      a.smashWindow = Math.min(a.smashWindow, 0.08)
+      a.attackTargetId = null
+    }
+    if (rushIntoGuardB) {
+      b.attackRushTimer = 0
+      b.attackCommitTimer = 0
+      b.attackLockTimer = 0
+      b.attackSnapTimer = 0
+      b.smashWindow = Math.min(b.smashWindow, 0.08)
+      b.attackTargetId = null
+    }
 
-    let spinLossA = (0.7 + impact * 0.12) / defenseA
-    let spinLossB = (0.7 + impact * 0.12) / defenseB
+    let spinLossA = (0.7 + impact * 0.12) / defenseA * (sameSpin ? 0.92 : 1.08 * oppositeSpinScale) * (a.def.physics.collisionSpinLossScale || 1) * getLayerSpinTraitScale(a, sameSpin)
+    let spinLossB = (0.7 + impact * 0.12) / defenseB * (sameSpin ? 0.92 : 1.08 * oppositeSpinScale) * (b.def.physics.collisionSpinLossScale || 1) * getLayerSpinTraitScale(b, sameSpin)
     if (a.guarding > 0) {
       spinLossA *= DEFENSE_SPECIAL.guardedSpinAbsorb
       spinLossB += DEFENSE_SPECIAL.reflectSpinBonus + impact * DEFENSE_SPECIAL.reflectSpinImpactScale
+      if (rushIntoGuardB) spinLossB *= DEFENSE_SPECIAL.rushReflectSpinScale
     }
     if (b.guarding > 0) {
       spinLossB *= DEFENSE_SPECIAL.guardedSpinAbsorb
       spinLossA += DEFENSE_SPECIAL.reflectSpinBonus + impact * DEFENSE_SPECIAL.reflectSpinImpactScale
+      if (rushIntoGuardA) spinLossA *= DEFENSE_SPECIAL.rushReflectSpinScale
     }
     if (a.trickDodgeTimer > 0) spinLossA *= TRICK_SPECIAL.dodgeSpinAbsorb
     if (b.trickDodgeTimer > 0) spinLossB *= TRICK_SPECIAL.dodgeSpinAbsorb
@@ -1975,6 +2301,8 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     if (b.trickCounterTimer > 0) spinLossA += TRICK_SPECIAL.counterSpinBonus + impact * TRICK_SPECIAL.counterSpinImpactScale
     if (a.silentOrbit > 0) spinLossA *= STAMINA_SPECIAL.collisionDrainMultiplier
     if (b.silentOrbit > 0) spinLossB *= STAMINA_SPECIAL.collisionDrainMultiplier
+    spinLossA *= SPIN_DRAIN.collisionScale
+    spinLossB *= SPIN_DRAIN.collisionScale
     a.spin = Math.max(0, a.spin - spinLossA)
     b.spin = Math.max(0, b.spin - spinLossB)
     if (a.vampireDrain > 0) {
@@ -1995,10 +2323,15 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       b.rubberDrainTargetId = a.id
       b.ultGlow = Math.max(b.ultGlow, 0.78)
     }
+    if (!sameSpin) {
+      const spinEdge = Math.max(-1.5, Math.min(1.5, (a.spin - b.spin) * 0.025))
+      a.spin = Math.max(0, a.spin + Math.max(0, spinEdge) * 0.3)
+      b.spin = Math.max(0, b.spin + Math.max(0, -spinEdge) * 0.3)
+    }
     a.special = Math.min(100, a.special + impact * 1.1)
     b.special = Math.min(100, b.special + impact * 1.1)
-    a.wobble = Math.min(0.48, a.wobble + 0.02 + impact * 0.005 / defenseA)
-    b.wobble = Math.min(0.48, b.wobble + 0.02 + impact * 0.005 / defenseB)
+    a.wobble = Math.min(0.52, a.wobble + (0.016 + impact * 0.005 / defenseA) * (sameSpin ? 1 : 1.22) * (a.def.physics.wobbleGainMultiplier || 1))
+    b.wobble = Math.min(0.52, b.wobble + (0.016 + impact * 0.005 / defenseB) * (sameSpin ? 1 : 1.22) * (b.def.physics.wobbleGainMultiplier || 1))
     a.lastImpact = 0.4
     b.lastImpact = 0.4
     runtimeState.cameraShake = Math.max(runtimeState.cameraShake, Math.min(0.4, impact * 0.015))
@@ -2034,6 +2367,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.spin = playerSnapshot.spin
       blade.special = playerSnapshot.special
       blade.wobble = playerSnapshot.wobble
+      blade.spinDir = playerSnapshot.spinDir || blade.spinDir || 1
       blade.guarding = playerSnapshot.guarding
       blade.silentOrbit = playerSnapshot.silentOrbit
       blade.silentOrbitPulse = playerSnapshot.silentOrbitPulse || 0
@@ -2064,6 +2398,12 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.charge = playerSnapshot.charge
       blade.launchAngle = playerSnapshot.launchAngle
       blade.launchPower = playerSnapshot.launchPower
+      blade.launchLocked = Boolean(playerSnapshot.launchLocked)
+      blade.lockedCharge = playerSnapshot.lockedCharge || 0
+      blade.lockedLaunchAngle = playerSnapshot.lockedLaunchAngle || blade.launchAngle
+      blade.lockedSpinDir = playerSnapshot.lockedSpinDir || blade.spinDir || 1
+      blade.launchTimingScore = playerSnapshot.launchTimingScore || 0
+      blade.launchGrade = playerSnapshot.launchGrade || 'Unreleased'
       blade.ringOutVisual = playerSnapshot.ringOutVisual ? { ...playerSnapshot.ringOutVisual } : null
       blade.rb.setTranslation({ x: playerSnapshot.pos.x, y: 0.22, z: playerSnapshot.pos.z }, true)
       blade.rb.setLinvel({ x: playerSnapshot.vel.x, y: 0, z: playerSnapshot.vel.z }, true)
@@ -2083,6 +2423,10 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         )
         if (ultActivated) {
           commitUltUse(runtimeState.localBuildKey)
+        }
+        if (blade.guarding > 0 && blade.guardAnchor) {
+          blade.rb.setTranslation({ x: blade.guardAnchor.x, y: 0.22, z: blade.guardAnchor.z }, true)
+          blade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
         }
       }
     }
@@ -2190,8 +2534,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     const bladesById = new Map()
 
     function createBlade(participant, index) {
-      const def = BUILD_DEFS[participant.build]
-      const meshPack = createBeybladeMesh(def.color, def.accent, participant.build)
+      const loadout = normalizeLoadout(participant.loadout || participant.build)
+      const def = buildResolvedBlade(loadout)
+      const meshPack = createBeybladeMesh(def.color, def.accent, def.key)
       scene.add(meshPack.group)
       const bladeLight = new THREE.PointLight(new THREE.Color(def.color), 0, 8, 2)
       scene.add(bladeLight)
@@ -2331,8 +2676,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
       const blade = {
         id: participant.id,
-        key: participant.build,
+        key: def.key,
         def,
+        loadout,
         name: participant.name,
         kind: participant.kind,
         isLocal: participant.id === config.localPlayerId,
@@ -2362,7 +2708,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         spawn,
         radius: 0.78,
         spin: 0,
-        spinDir: index % 2 === 0 ? 1 : -1,
+        spinDir: participant.kind === 'cpu' ? (Math.random() < 0.5 ? -1 : 1) : 1,
         wobble: 0.02,
         special: 12,
         alive: true,
@@ -2386,14 +2732,24 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         attackRushTimer: 0,
         attackCommitTimer: 0,
         attackTargetId: null,
+        guardAnchor: null,
         attackSnapTimer: 0,
         attackSlashTimer: 0,
         cpuLaunchCharge: CPU_LAUNCH.baseCharge,
         cpuLaunchAngle: spawn.angle,
+        cpuLaunchReleaseTime: LAUNCH_TIMING.idealRelease,
+        cpuSpinDir: 1,
         boostCooldown: 0,
         lastImpact: 0,
         launchAngle: spawn.angle,
         launchPower: 0,
+        launchLocked: false,
+        lockedCharge: 0,
+        lockedLaunchAngle: spawn.angle,
+        lockedSpinDir: 1,
+        launchTimingScore: 0,
+        launchGrade: 'Unreleased',
+        forcedLaunch: false,
         deathType: null,
         ultGlow: 0,
         visualSpin: 0,
@@ -2428,6 +2784,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       roundResolved: false,
       matchOver: false,
       roundResetTimer: 0,
+      fightElapsed: 0,
       lastTime: performance.now(),
       lastDt: 0,
       localInput: serialiseInput({}),
@@ -2447,10 +2804,49 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       const dir = new THREE.Vector3(Math.cos(blade.launchAngle), 0, Math.sin(blade.launchAngle))
       blade.arrow.position.set(blade.spawn.x, getSurfaceYAtXZ(blade.spawn.x, blade.spawn.z, 0.42), blade.spawn.z)
       blade.arrow.setDirection(dir)
-      blade.arrow.setLength(1.4 + blade.charge * 2.6, 0.55 + blade.charge * 0.18, 0.28)
-      blade.arrow.setColor(new THREE.Color(blade.def.color).lerp(new THREE.Color(blade.def.accent), blade.charge * 0.55))
+      const arrowCharge = blade.launchLocked ? blade.lockedCharge : blade.charge
+      const arrowScore = blade.launchLocked ? blade.launchTimingScore : arrowCharge
+      const badgeEntry = launchBadges.value.find((entry) => entry.id === blade.id)
+      if (badgeEntry) {
+        badgeEntry.grade = blade.launchGrade
+        badgeEntry.powerPercent = Math.round(clamp01(arrowCharge) * 100)
+        badgeEntry.spinDir = blade.launchLocked ? blade.lockedSpinDir : blade.spinDir
+        badgeEntry.color = blade.def.color
+        badgeEntry.accent = blade.def.accent
+      }
+      blade.arrow.setLength(1.4 + arrowCharge * 2.6, 0.55 + arrowCharge * 0.18, 0.28)
+      blade.arrow.setColor(new THREE.Color(blade.def.color).lerp(new THREE.Color(blade.spinDir > 0 ? blade.def.accent : 0xf5fff7), clamp01(0.26 + arrowScore * 0.52)))
       blade.arrow.visible = runtimeState.phase === 'aiming'
-      if (blade.id === runtimeState.localPlayerId) aimAngle.value = blade.launchAngle
+      if (blade.arrow.visible) {
+        updateLaunchScreenAnchor(
+          blade,
+          runtimeState,
+          blade.arrow.position.x,
+          blade.arrow.position.y + 0.62,
+          blade.arrow.position.z,
+        )
+      }
+      if (blade.id === runtimeState.localPlayerId) {
+        const timingProfile = getBladeLaunchTimingProfile(blade)
+        aimAngle.value = blade.launchAngle
+        launchState.value = {
+          ...launchState.value,
+          charge: arrowCharge,
+          angle: blade.launchAngle,
+          spinDir: blade.spinDir,
+          locked: blade.launchLocked,
+          grade: blade.launchGrade,
+          timingScore: blade.launchTimingScore,
+          countdownProgress: runtimeState.phase === 'aiming' ? clamp01(1 - runtimeState.countdownTimer / AIM_COUNTDOWN_DURATION) : 1,
+          idealProgress: clamp01(1 - timingProfile.idealRelease / AIM_COUNTDOWN_DURATION),
+          perfectWindowProgress: Math.max(0.04, timingProfile.perfectWindow / AIM_COUNTDOWN_DURATION),
+          chargeSweetSpot: LAUNCH_TIMING.chargeSweetSpot,
+          chargeWindow: LAUNCH_TIMING.chargeWindow,
+          forced: blade.forcedLaunch,
+          color: blade.def.color,
+          accent: blade.def.accent,
+        }
+      }
     }
 
     function updateAttackLockVisual(blade) {
@@ -2517,11 +2913,12 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     function resetRound() {
       runtimeState.roundResolved = false
       runtimeState.phase = 'aiming'
+      runtimeState.fightElapsed = 0
       runtimeState.countdownTimer = AIM_COUNTDOWN_DURATION
       runtimeState.nextCountdownIndex = 0
       countdown.value = 3
       roundResult.value = null
-      status.value = runtimeState.authoritative ? 'Hold SPACE to charge. Aim with A / D. GO fires automatically.' : 'Waiting for host launch.'
+      status.value = runtimeState.authoritative ? 'Hold SPACE to charge, release before GO, aim with A / D, set spin with W / S.' : 'Waiting for host launch.'
       for (const blade of runtimeState.blades) {
         blade.rb.setTranslation({ x: blade.spawn.x, y: 0.22, z: blade.spawn.z }, true)
         blade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
@@ -2530,6 +2927,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         blade.wobble = 0.02
         blade.alive = true
         blade.guarding = 0
+        blade.guardAnchor = null
         blade.silentOrbit = 0
         blade.silentOrbitPulse = 0
         blade.vampireDrain = 0
@@ -2558,10 +2956,18 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         blade.deathType = null
         blade.ringOutVisual = null
         blade.launchPower = 0
+        blade.launchLocked = false
+        blade.lockedCharge = 0
+        blade.lockedLaunchAngle = blade.spawn.angle
+        blade.lockedSpinDir = blade.kind === 'cpu' ? blade.cpuSpinDir : blade.spinDir || 1
+        blade.launchTimingScore = 0
+        blade.launchGrade = 'Unreleased'
+        blade.forcedLaunch = false
         if (blade.kind === 'cpu') {
           rollCpuLaunchProfile(blade)
           blade.charge = 0
           blade.launchAngle = blade.spawn.angle
+          blade.spinDir = blade.cpuSpinDir
         } else {
           blade.charge = 0
           blade.launchAngle = blade.spawn.angle
@@ -2575,18 +2981,30 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
     function launchRound() {
       for (const blade of runtimeState.blades) {
-        blade.launchPower = 5 + blade.charge * 6 * blade.def.stats.speed
+        if (!blade.launchLocked) {
+          lockLaunchState(blade, runtimeState, true)
+        }
+        const launchCharge = blade.launchLocked ? blade.lockedCharge : blade.charge
+        const launchScore = blade.launchTimingScore || 0.3
+        blade.launchAngle = blade.lockedLaunchAngle || blade.launchAngle
+        blade.spinDir = blade.lockedSpinDir || blade.spinDir || 1
+        blade.launchPower = (2.5 + launchCharge * 3 * blade.def.stats.speed) * (blade.def.physics.launchPowerScale || 1) * getLaunchOpeningPowerScale(launchScore, blade.forcedLaunch)
         blade.rb.setTranslation({ x: blade.spawn.x, y: 0.22, z: blade.spawn.z }, true)
         blade.rb.setLinvel({ x: Math.cos(blade.launchAngle) * blade.launchPower, y: 0, z: Math.sin(blade.launchAngle) * blade.launchPower }, true)
-        blade.spin = blade.kind === 'cpu'
-          ? 46 + 12 * blade.def.stats.stamina
-          : 38 + blade.charge * 28 * blade.def.stats.stamina
+        blade.spin = (
+          blade.kind === 'cpu'
+            ? 46 + 12 * blade.def.stats.stamina
+            : 34 + launchCharge * 32 * blade.def.stats.stamina
+        ) * (blade.def.physics.launchSpinScale || 1) * mix(0.84, 1.14, launchScore)
+        blade.wobble = getLaunchOpeningWobble(launchScore, blade.launchGrade, blade)
         blade.arrow.visible = false
         updateAttackLockVisual(blade)
       }
       runtimeState.phase = 'fighting'
+      runtimeState.fightElapsed = 0
       countdown.value = null
-      status.value = 'Fight! WASD to drift, Shift to burst, E to stabilise, Q for special.'
+      const localBlade = runtimeState.bladesById.get(runtimeState.localPlayerId)
+      status.value = `${localBlade?.launchGrade || 'Fight'} launch. WASD to drift, Shift to burst, E to stabilise, Q for special.`
       beep({ freq: 240, duration: 0.08, type: 'sawtooth', gain: 0.03, slideTo: 130 })
     }
 
@@ -2660,9 +3078,14 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
           for (const blade of runtimeState.blades) {
             if (blade.kind === 'cpu') {
-              const aimProgress = clamp01(1 - runtimeState.countdownTimer / AIM_COUNTDOWN_DURATION)
-              blade.charge = mix(0, blade.cpuLaunchCharge, aimProgress)
-              blade.launchAngle = mix(blade.spawn.angle, blade.cpuLaunchAngle, aimProgress)
+              if (!blade.launchLocked) {
+                const releaseProgress = clamp01(1 - Math.max(runtimeState.countdownTimer, blade.cpuLaunchReleaseTime) / AIM_COUNTDOWN_DURATION)
+                blade.charge = mix(0, blade.cpuLaunchCharge, releaseProgress)
+                blade.launchAngle = mix(blade.spawn.angle, blade.cpuLaunchAngle, releaseProgress)
+                if (runtimeState.countdownTimer <= blade.cpuLaunchReleaseTime) {
+                  lockLaunchState(blade, runtimeState)
+                }
+              }
             } else if (blade.id === runtimeState.localPlayerId) {
               applyHumanInput(blade, runtimeState.localInput, dt, 'aiming', runtimeState)
             } else {
@@ -2673,6 +3096,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
           if (runtimeState.countdownTimer <= 0) launchRound()
         } else if (runtimeState.phase === 'fighting') {
+          runtimeState.fightElapsed += dt
           for (const blade of runtimeState.blades) {
             if (blade.kind === 'cpu') runCpuBrain(runtimeState, blade, dt)
             else if (blade.id === runtimeState.localPlayerId) applyHumanInput(blade, runtimeState.localInput, dt, 'fighting', runtimeState)
@@ -2754,8 +3178,8 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       localPlayerId: 'local-player',
       scoreToWin: 2,
       participants: [
-        { id: 'local-player', name: playerName, build: selectedBuild.value, kind: 'human' },
-        { id: 'cpu-opponent', name: 'CPU', build: cpuBuild, kind: 'cpu' },
+        { id: 'local-player', name: playerName, build: selectedBuild.value, loadout: selectedLoadout.value, kind: 'human' },
+        { id: 'cpu-opponent', name: 'CPU', build: cpuBuild, loadout: createDefaultLoadout(cpuBuild), kind: 'cpu' },
       ],
     })
   }
@@ -2769,6 +3193,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       scoreToWin: matchConfig.scoreToWin || 2,
       participants: matchConfig.participants.map((participant) => ({
         ...participant,
+        loadout: normalizeLoadout(participant.loadout || participant.build),
         kind: 'human',
       })),
     })
@@ -2779,10 +3204,10 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     disposeRuntime()
   }
 
-  watch(selectedBuild, (build) => {
-    storeSelectedBuild(build)
+  watch(selectedLoadout, (loadout) => {
+    storeSelectedBuild(loadout)
     if (roomApi?.room?.value) {
-      roomApi.updateProfile({ name: roomApi.playerName.value, build, record: playerRecord.value })
+      roomApi.updateProfile({ name: roomApi.playerName.value, build: loadout.layer, loadout, record: playerRecord.value })
     }
   })
 
@@ -2805,6 +3230,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
   return {
     selectedBuild,
+    selectedDisc,
+    selectedDriver,
+    selectedLoadout,
     playerRecord,
     playerStats,
     menuMode,
@@ -2813,9 +3241,13 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     scoreboard,
     hudPlayers,
     buildEntries,
+    discEntries,
+    driverEntries,
     roundResult,
     countdown,
     aimAngle,
+    launchBadges,
+    launchState,
     launchSinglePlayerMatch,
     returnToMenu,
   }

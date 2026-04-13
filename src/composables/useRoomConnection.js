@@ -7,6 +7,14 @@ function createEmptyRecord() {
   }
 }
 
+function createEmptyLoadout() {
+  return {
+    layer: 'attack',
+    disc: 'assault',
+    driver: 'rush',
+  }
+}
+
 function normalizeRecord(record) {
   const source = record || {}
   const cpu = source.cpu || {}
@@ -20,6 +28,15 @@ function normalizeRecord(record) {
       wins: Math.max(0, Number(player.wins) || 0),
       losses: Math.max(0, Number(player.losses) || 0),
     },
+  }
+}
+
+function normalizeLoadout(loadout) {
+  const source = loadout || {}
+  return {
+    layer: String(source.layer || 'attack'),
+    disc: String(source.disc || 'assault'),
+    driver: String(source.driver || 'rush'),
   }
 }
 
@@ -46,6 +63,7 @@ export function useRoomConnection() {
   const clientId = ref('')
   const playerName = ref('')
   const playerRecord = ref(createEmptyRecord())
+  const playerLoadout = ref(createEmptyLoadout())
   const room = ref(null)
   const latestSnapshot = ref(null)
   const latestMatchConfig = ref(null)
@@ -94,7 +112,7 @@ export function useRoomConnection() {
         case 'welcome':
           clientId.value = message.clientId
           playerName.value = normalizePlayerName(playerName.value || message.playerName)
-          send('set_identity', { name: playerName.value, build: 'attack', record: playerRecord.value })
+          send('set_identity', { name: playerName.value, build: playerLoadout.value.layer, loadout: playerLoadout.value, record: playerRecord.value })
           break
         case 'room_state':
           room.value = message.room
@@ -159,30 +177,33 @@ export function useRoomConnection() {
     return connectionState.value === 'connected'
   }
 
-  async function connectAndCreateRoom({ name, build, record = playerRecord.value }) {
+  async function connectAndCreateRoom({ name, build, loadout = playerLoadout.value, record = playerRecord.value }) {
     playerName.value = normalizePlayerName(name)
     playerRecord.value = normalizeRecord(record)
+    playerLoadout.value = normalizeLoadout(loadout)
     const ok = await ensureConnected()
     if (!ok) return false
-    send('set_identity', { name: playerName.value, build, record: playerRecord.value })
+    send('set_identity', { name: playerName.value, build, loadout: playerLoadout.value, record: playerRecord.value })
     send('create_room')
     return true
   }
 
-  async function connectAndJoinRoom({ roomId, name, build, record = playerRecord.value }) {
+  async function connectAndJoinRoom({ roomId, name, build, loadout = playerLoadout.value, record = playerRecord.value }) {
     playerName.value = normalizePlayerName(name)
     playerRecord.value = normalizeRecord(record)
+    playerLoadout.value = normalizeLoadout(loadout)
     const ok = await ensureConnected()
     if (!ok) return false
-    send('set_identity', { name: playerName.value, build, record: playerRecord.value })
+    send('set_identity', { name: playerName.value, build, loadout: playerLoadout.value, record: playerRecord.value })
     send('join_room', { roomId: roomId.toUpperCase() })
     return true
   }
 
-  function updateProfile({ name, build, record }) {
+  function updateProfile({ name, build, loadout, record }) {
     playerName.value = normalizePlayerName(name || playerName.value)
     playerRecord.value = normalizeRecord(record || playerRecord.value)
-    send('update_profile', { name: playerName.value, build, record: playerRecord.value })
+    playerLoadout.value = normalizeLoadout(loadout || playerLoadout.value)
+    send('update_profile', { name: playerName.value, build, loadout: playerLoadout.value, record: playerRecord.value })
   }
 
   function setReady(ready) {
@@ -232,6 +253,7 @@ export function useRoomConnection() {
     clientId,
     playerName,
     playerRecord,
+    playerLoadout,
     room,
     roomId,
     shareUrl,

@@ -1,10 +1,11 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { BUILD_DEFS } from '../data/buildDefs.js'
+import { createDefaultLoadout } from '../data/partDefs.js'
 import { useRoomConnection } from '../composables/useRoomConnection.js'
 import { useBeybladeSimulation } from '../composables/useBeybladeSimulation.js'
 import snowverLogo from '../assets/snowverpowered.png'
-import { Anvil, Copy, Heart, Link2, Play, Radio, Users, Wifi, WifiOff, Zap } from 'lucide-vue-next'
+import { Anvil, Clock3, Copy, Heart, Link2, Play, Radio, RotateCcw, RotateCw, Users, Wifi, WifiOff, Zap } from 'lucide-vue-next'
 
 const PLAYER_ALIAS_STORAGE_KEY = 'spin-clash:player-alias'
 
@@ -13,6 +14,9 @@ const roomApi = useRoomConnection()
 
 const {
   selectedBuild,
+  selectedDisc,
+  selectedDriver,
+  selectedLoadout,
   playerRecord,
   menuMode,
   gamePhase,
@@ -22,6 +26,8 @@ const {
   buildEntries,
   roundResult,
   countdown,
+  launchBadges,
+  launchState,
   launchSinglePlayerMatch,
   returnToMenu,
 } = useBeybladeSimulation(mountRef, roomApi)
@@ -31,15 +37,21 @@ const cardVisible = ref(true)
 const playerAlias = ref('Blader')
 const joinCode = ref('')
 const copyState = ref('')
+const launchBadgeVisible = ref(false)
+
+let launchBadgeTimer = null
 
 watch(selectedBuild, () => {
+  const defaults = createDefaultLoadout(selectedBuild.value)
+  selectedDisc.value = defaults.disc
+  selectedDriver.value = defaults.driver
   cardVisible.value = false
 })
 
 watch(playerAlias, (name) => {
   storePlayerAlias(name)
   if (roomApi.room.value) {
-    roomApi.updateProfile({ name, build: selectedBuild.value })
+    roomApi.updateProfile({ name, build: selectedBuild.value, loadout: selectedLoadout.value })
   }
 })
 
@@ -74,7 +86,8 @@ const modeLabel = computed(() => menuMode.value === 'online' ? 'Online Room' : '
 
 const controlsList = [
   ['A / D', 'Aim before launch'],
-  ['SPACE', 'Hold to charge power'],
+  ['SPACE', 'Hold to charge, release before GO'],
+  ['W / S', 'Set clockwise or counter spin'],
   ['WASD', 'Drift in combat'],
   ['SHIFT', 'Burst dash'],
   ['E', 'Stabilise / reduce wobble'],
@@ -108,6 +121,132 @@ function getRecordLine(record, matchType) {
 
 const activeRecordLabel = computed(() => menuMode.value === 'online' ? 'VS Player' : 'VS CPU')
 const activeRecordValue = computed(() => getRecordLine(playerRecord.value, menuMode.value === 'online' ? 'player' : 'cpu'))
+const launchSpinIcon = computed(() => launchState.value.spinDir > 0 ? RotateCw : RotateCcw)
+const launchPowerPercent = computed(() => Math.round(launchState.value.charge * 100))
+const launchTimingCursorStyle = computed(() => ({ left: `${Math.round(launchState.value.countdownProgress * 100)}%` }))
+const launchTimingWindowStyle = computed(() => {
+  const width = Math.max(8, launchState.value.perfectWindowProgress * 100)
+  const left = Math.max(0, Math.min(100 - width, launchState.value.idealProgress * 100 - width * 0.5))
+  return {
+    left: `${left}%`,
+    width: `${width}%`,
+  }
+})
+const launchChargeFillStyle = computed(() => ({ width: `${launchPowerPercent.value}%` }))
+const launchChargeWindowStyle = computed(() => {
+  const width = Math.max(10, launchState.value.chargeWindow * 42)
+  const left = Math.max(0, Math.min(100 - width, launchState.value.chargeSweetSpot * 100 - width * 0.5))
+  return {
+    left: `${left}%`,
+    width: `${width}%`,
+  }
+})
+const launchHudStyle = computed(() => ({
+  borderColor: `${launchState.value.color}30`,
+  boxShadow: `inset 0 0 20px ${launchState.value.color}10, 0 0 0 1px ${launchState.value.color}18`,
+}))
+const launchHudPositionStyle = computed(() => {
+  if (!launchState.value.screenVisible) {
+    return {
+      left: '50%',
+      top: '96px',
+      transform: 'translateX(-50%)',
+    }
+  }
+
+  return {
+    left: `clamp(180px, ${launchState.value.screenX}%, calc(100% - 180px))`,
+    top: `max(88px, calc(${launchState.value.screenY}% - 104px))`,
+    transform: 'translateX(-50%)',
+  }
+})
+
+function getLaunchBadgeTheme(grade) {
+  if (grade === 'Perfect') return { color: '#FFE500', glow: 'rgba(255,229,0,0.34)' }
+  if (grade === 'Great') return { color: '#00E5FF', glow: 'rgba(0,229,255,0.3)' }
+  if (grade === 'Good') return { color: '#7df9ff', glow: 'rgba(125,249,255,0.28)' }
+  if (grade === 'Forced') return { color: '#f97316', glow: 'rgba(249,115,22,0.32)' }
+  return { color: '#fb7185', glow: 'rgba(251,113,133,0.28)' }
+}
+
+function usesLaunchWarningTheme(grade) {
+  return grade === 'Rough' || grade === 'Forced'
+}
+
+function getLaunchCardStyle(badge) {
+  const theme = getLaunchBadgeTheme(badge.grade)
+  if (usesLaunchWarningTheme(badge.grade)) {
+    return {
+      borderColor: theme.color,
+      boxShadow: `0 0 0 1px ${theme.glow}, 0 0 32px ${theme.glow}`,
+    }
+  }
+
+  return {
+    borderColor: badge.color || theme.color,
+    boxShadow: `0 0 0 1px ${(badge.accent || theme.color)}22, 0 0 32px ${(badge.accent || theme.color)}22`,
+  }
+}
+
+function getLaunchBadgeGradeStyle(badge) {
+  const theme = getLaunchBadgeTheme(badge.grade)
+  if (usesLaunchWarningTheme(badge.grade)) {
+    return {
+      color: theme.color,
+      textShadow: `0 0 20px ${theme.glow}`,
+    }
+  }
+
+  return {
+    color: badge.accent || theme.color,
+    textShadow: `0 0 20px ${badge.accent || theme.glow}`,
+  }
+}
+
+function getSpinIcon(spinDir) {
+  return spinDir > 0 ? RotateCw : RotateCcw
+}
+
+function getLaunchBadgeStyle(badge) {
+  return {
+    left: `clamp(100px, ${badge.stableScreenX ?? badge.screenX}%, calc(100% - 100px))`,
+    top: `clamp(118px, ${badge.stableScreenY ?? badge.screenY}%, calc(100% - 18px))`,
+  }
+}
+
+function getLaunchBadgeLabel(badge) {
+  if (badge.isLocal) return 'You'
+  if (badge.isCpu) return 'CPU'
+  return badge.name
+}
+
+const launchGradeTheme = computed(() => getLaunchBadgeTheme(launchState.value.grade))
+const visibleLaunchBadges = computed(() => launchBadgeVisible.value
+  ? launchBadges.value.filter((badge) => (badge.hasStableAnchor || badge.screenVisible) && badge.grade !== 'Unreleased')
+  : [])
+
+function clearLaunchBadgeTimer() {
+  if (launchBadgeTimer) {
+    clearTimeout(launchBadgeTimer)
+    launchBadgeTimer = null
+  }
+}
+
+function showLaunchBadge() {
+  if (!launchState.value.locked || launchState.value.grade === 'Unreleased') return
+  launchBadgeVisible.value = true
+  clearLaunchBadgeTimer()
+  launchBadgeTimer = setTimeout(() => {
+    launchBadgeVisible.value = false
+    launchBadgeTimer = null
+  }, 1780)
+}
+
+watch(countdown, (current, previous) => {
+  if (previous !== null && current === null) {
+    showLaunchBadge()
+  }
+})
 
 function onSpotlightAfterLeave() {
   displayBuild.value = selectedBuild.value
@@ -140,7 +279,7 @@ async function createRoom() {
   menuMode.value = 'online'
   const name = resolvePlayerAlias()
   playerAlias.value = name
-  await roomApi.connectAndCreateRoom({ name, build: selectedBuild.value, record: playerRecord.value })
+  await roomApi.connectAndCreateRoom({ name, build: selectedBuild.value, loadout: selectedLoadout.value, record: playerRecord.value })
 }
 
 async function joinRoom() {
@@ -148,7 +287,7 @@ async function joinRoom() {
   menuMode.value = 'online'
   const name = resolvePlayerAlias()
   playerAlias.value = name
-  await roomApi.connectAndJoinRoom({ roomId: joinCode.value.trim(), name, build: selectedBuild.value, record: playerRecord.value })
+  await roomApi.connectAndJoinRoom({ roomId: joinCode.value.trim(), name, build: selectedBuild.value, loadout: selectedLoadout.value, record: playerRecord.value })
 }
 
 function toggleReady() {
@@ -192,8 +331,12 @@ onMounted(() => {
   if (roomId) {
     menuMode.value = 'online'
     joinCode.value = roomId
-    roomApi.connectAndJoinRoom({ roomId, name: resolvePlayerAlias(), build: selectedBuild.value, record: playerRecord.value })
+    roomApi.connectAndJoinRoom({ roomId, name: resolvePlayerAlias(), build: selectedBuild.value, loadout: selectedLoadout.value, record: playerRecord.value })
   }
+})
+
+onUnmounted(() => {
+  clearLaunchBadgeTimer()
 })
 </script>
 
@@ -258,7 +401,7 @@ onMounted(() => {
                 <span class="cb-tag" :style="{ background: BUILD_DEFS[entry.build].color, color: '#060610' }">{{ entry.isCpu ? 'CPU' : entry.isLocal ? 'You' : 'Player' }}</span>
                 <div class="w-2 h-2" :style="{ background: BUILD_DEFS[entry.build].color, clipPath: 'polygon(50% 0,100% 50%,50% 100%,0 50%)' }" />
                 <span class="text-[11px] font-black uppercase tracking-[0.12em]">{{ entry.name }}</span>
-                <span class="ml-auto text-[9px] uppercase tracking-[0.22em] text-white/35">{{ BUILD_DEFS[entry.build].name }}</span>
+                <span class="ml-auto text-[9px] uppercase tracking-[0.16em] text-white/35">{{ BUILD_DEFS[entry.build].name }}</span>
               </div>
 
               <div class="flex items-center gap-2 mb-1.5">
@@ -281,6 +424,65 @@ onMounted(() => {
         </div>
 
         <div v-if="countdown !== null" class="absolute inset-0 z-25 pointer-events-none" style="z-index:25">
+          <div class="absolute w-[min(360px,calc(100%-2rem))] launch-hud-wrap" :style="launchHudPositionStyle">
+            <div class="launch-hud" :class="{ 'is-locked': launchState.locked }" :style="launchHudStyle">
+              <div class="flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-[7px] uppercase tracking-[0.38em] text-white/32">Launch</div>
+                  <div class="mt-0.5 text-[11px] font-black uppercase tracking-[0.12em]" :style="{ color: launchState.locked ? launchGradeTheme.color : '#ffffff' }">
+                    {{ launchState.locked ? launchState.grade : 'Release on the mark' }}
+                  </div>
+                </div>
+                <div class="flex items-center gap-1.5 text-[7px] uppercase tracking-[0.16em] text-white/52">
+                  <span class="launch-key inline-flex items-center gap-1" :class="launchState.spinDir > 0 ? 'is-active' : ''">
+                    <RotateCw class="h-3 w-3" />
+                    <span>W</span>
+                  </span>
+                  <span class="launch-key inline-flex items-center gap-1" :class="launchState.spinDir < 0 ? 'is-active' : ''">
+                    <RotateCcw class="h-3 w-3" />
+                    <span>S</span>
+                  </span>
+                  <component :is="launchSpinIcon" class="h-3.5 w-3.5 text-white/78" />
+                </div>
+              </div>
+
+              <div class="mt-1.5 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2 launch-hud-grid">
+                <div>
+                  <div class="mb-1 flex items-center justify-between text-[6px] uppercase tracking-[0.2em] text-white/32">
+                    <span class="inline-flex items-center gap-1"><Clock3 class="h-2.5 w-2.5" />Timing</span>
+                    <span>{{ launchState.locked ? 'Locked' : 'Release in zone' }}</span>
+                  </div>
+                  <div class="launch-lane">
+                    <div class="launch-window" :style="{ ...launchTimingWindowStyle, background: `linear-gradient(90deg, ${launchState.accent}2e 0%, ${launchState.accent}70 100%)`, boxShadow: `0 0 18px ${launchState.accent}35` }" />
+                    <div class="launch-cursor" :style="launchTimingCursorStyle" :class="{ 'is-locked': launchState.locked }" />
+                    <div class="launch-target-tag" :style="{ ...launchTimingWindowStyle, color: launchState.accent, borderColor: `${launchState.accent}55`, background: `${launchState.accent}12` }">RELEASE</div>
+                  </div>
+                  <div class="launch-lane-note-row">
+                    <span>Hold</span>
+                    <span :style="{ color: `${launchState.accent}cc` }">Target</span>
+                    <span>GO</span>
+                  </div>
+                </div>
+
+                <div>
+                  <div class="mb-1 flex items-center justify-between text-[6px] uppercase tracking-[0.2em] text-white/32">
+                    <span class="inline-flex items-center gap-1"><Zap class="h-2.5 w-2.5" />Power</span>
+                    <span>{{ launchState.locked ? 'Set' : `${launchPowerPercent}%` }}</span>
+                  </div>
+                  <div class="launch-lane">
+                    <div class="launch-window launch-window-charge" :style="{ ...launchChargeWindowStyle, background: `linear-gradient(90deg, ${launchState.color}24 0%, ${launchState.accent}40 100%)`, boxShadow: `0 0 18px ${launchState.color}25` }" />
+                    <div class="launch-fill" :style="{ ...launchChargeFillStyle, background: `linear-gradient(90deg, ${launchState.color} 0%, ${launchState.accent} 100%)`, boxShadow: `0 0 16px ${launchState.color}28` }" />
+                    <div class="launch-target-tag launch-target-tag-charge" :style="{ ...launchChargeWindowStyle, color: launchState.color, borderColor: `${launchState.color}55`, background: `${launchState.color}12` }">SWEET</div>
+                  </div>
+                  <div class="launch-lane-note-row">
+                    <span>Low</span>
+                    <span :style="{ color: `${launchState.color}cc` }">Sweet spot</span>
+                    <span>Overhold</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
           <div class="absolute inset-0 flex items-center justify-center">
             <Transition name="cd-pop" mode="out-in">
               <div :key="countdown" class="font-black leading-none select-none" :class="countdown === 0 ? 'countdown-go' : 'countdown-num'">
@@ -289,6 +491,24 @@ onMounted(() => {
             </Transition>
           </div>
         </div>
+
+        <TransitionGroup name="launch-grade-pop" tag="div">
+          <div
+            v-for="badge in visibleLaunchBadges"
+            :key="badge.id"
+            class="absolute z-[29] pointer-events-none"
+            :style="getLaunchBadgeStyle(badge)"
+          >
+            <div class="launch-grade-card" :style="getLaunchCardStyle(badge)">
+              <div class="text-[8px] uppercase tracking-[0.52em] text-white/38">{{ getLaunchBadgeLabel(badge) }}</div>
+              <div class="mt-2 text-[clamp(1.35rem,2.6vw,2.35rem)] font-black uppercase tracking-[0.08em] leading-none" :style="getLaunchBadgeGradeStyle(badge)">{{ badge.grade }}</div>
+              <div class="mt-1.5 flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-white/52">
+                <component :is="getSpinIcon(badge.spinDir)" class="h-3.5 w-3.5" :style="{ color: badge.color || '#d7f0ff' }" />
+                <span>{{ badge.powerPercent }}% power</span>
+              </div>
+            </div>
+          </div>
+        </TransitionGroup>
 
         <Transition name="cb-result">
           <div v-if="roundResult" class="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
@@ -414,14 +634,32 @@ onMounted(() => {
                 <Transition name="spotlight" @after-leave="onSpotlightAfterLeave">
                   <div v-if="cardVisible" class="text-left cb-spotlight" :style="spotlightStyle(displayBuild)">
                     <div class="h-[2px]" :style="{ background: `linear-gradient(90deg,${BUILD_DEFS[displayBuild].color},${BUILD_DEFS[displayBuild].color}00)` }" />
-                    <div class="p-5">
+                    <div class="p-5 cb-spotlight-body">
                       <div class="flex items-center gap-3 mb-3">
                         <div class="w-5 h-5 flex-shrink-0" :style="{ background: BUILD_DEFS[displayBuild].color, clipPath: 'polygon(50% 0,100% 50%,50% 100%,0 50%)' }" />
                         <span class="font-black uppercase tracking-[0.18em] text-sm">{{ BUILD_DEFS[displayBuild].name }}</span>
                         <div class="ml-auto px-2 py-0.5 text-[8px] font-bold uppercase tracking-[0.3em]" :style="{ color: BUILD_DEFS[displayBuild].color, border: `1px solid ${BUILD_DEFS[displayBuild].color}55`, background: BUILD_DEFS[displayBuild].color + '14', clipPath: 'polygon(6px 0%,100% 0%,calc(100% - 6px) 100%,0% 100%)' }">{{ BUILD_DEFS[displayBuild].specialName }}</div>
                       </div>
+
                       <p class="text-[11px] text-white/40 leading-relaxed">{{ BUILD_DEFS[displayBuild].description }}</p>
-                      <p class="text-[10px] mt-2" :style="{ color: BUILD_DEFS[displayBuild].color + 'aa' }">▸ {{ BUILD_DEFS[displayBuild].specialDescription }}</p>
+
+                      <div class="mt-4 grid gap-2.5">
+                        <div v-for="({ icon, label, val }) in [
+                          { icon: Zap, label: 'Speed', val: BUILD_DEFS[displayBuild].stats.speed },
+                          { icon: Anvil, label: 'Weight', val: BUILD_DEFS[displayBuild].stats.weight },
+                          { icon: Heart, label: 'Stamina', val: BUILD_DEFS[displayBuild].stats.stamina },
+                        ]" :key="label" class="cb-spotlight-stat">
+                          <div class="cb-spotlight-stat-label">
+                            <component :is="icon" class="w-3.5 h-3.5" :stroke-width="2" />
+                            <span>{{ label }}</span>
+                          </div>
+                          <div class="cb-spotlight-stat-track">
+                            <div class="cb-spotlight-stat-fill" :style="{ width: Math.round(val / 1.5 * 100) + '%', background: BUILD_DEFS[displayBuild].color, boxShadow: `0 0 10px ${BUILD_DEFS[displayBuild].color}66` }" />
+                          </div>
+                        </div>
+                      </div>
+
+                      <p class="mt-4 text-[10px] leading-relaxed" :style="{ color: BUILD_DEFS[displayBuild].color + 'b0' }">▸ {{ BUILD_DEFS[displayBuild].specialDescription }}</p>
                     </div>
                   </div>
                 </Transition>
@@ -544,6 +782,39 @@ onMounted(() => {
 .build-card-details {
   overflow: hidden;
   transform-origin: top;
+}
+
+.cb-spotlight-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.cb-spotlight-stat {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.cb-spotlight-stat-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.42);
+}
+
+.cb-spotlight-stat-track {
+  height: 4px;
+  background: rgba(255,255,255,0.07);
+  overflow: hidden;
+}
+
+.cb-spotlight-stat-fill {
+  height: 100%;
 }
 
 .build-details-enter-active,
@@ -795,6 +1066,135 @@ onMounted(() => {
   backdrop-filter: blur(8px);
 }
 
+.launch-hud-wrap {
+  filter: drop-shadow(0 16px 36px rgba(0, 0, 0, 0.38));
+}
+
+.launch-hud {
+  background: linear-gradient(180deg, rgba(9,9,14,0.96) 0%, rgba(6,6,10,0.92) 100%);
+  border: 1px solid rgba(255,255,255,0.08);
+  padding: 8px 14px 7px;
+  clip-path: polygon(14px 0, 100% 0, calc(100% - 14px) 100%, 0 100%);
+  backdrop-filter: blur(12px);
+  transition: opacity 0.18s ease, transform 0.18s ease, filter 0.18s ease;
+}
+
+.launch-hud.is-locked {
+  opacity: 0.64;
+  filter: saturate(0.88);
+}
+
+.launch-hud-grid {
+  align-items: end;
+}
+
+.launch-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  padding: 1px 4px;
+  border: 1px solid rgba(255,229,0,0.24);
+  background: rgba(255,229,0,0.08);
+  color: #ffe500;
+  font-weight: 900;
+  clip-path: polygon(5px 0, 100% 0, calc(100% - 5px) 100%, 0 100%);
+}
+
+.launch-key.is-active {
+  border-color: rgba(255,229,0,0.44);
+  background: rgba(255,229,0,0.16);
+  box-shadow: inset 0 0 14px rgba(255,229,0,0.08), 0 0 14px rgba(255,229,0,0.14);
+}
+
+.launch-lane {
+  position: relative;
+  height: 9px;
+  background: linear-gradient(90deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.08) 100%);
+  border: 1px solid rgba(255,255,255,0.08);
+  clip-path: polygon(6px 0, 100% 0, calc(100% - 6px) 100%, 0 100%);
+  overflow: hidden;
+}
+
+.launch-window {
+  position: absolute;
+  inset: 2px auto 2px 0;
+  background: linear-gradient(90deg, rgba(255,229,0,0.18) 0%, rgba(255,229,0,0.42) 100%);
+  box-shadow: 0 0 18px rgba(255,229,0,0.24);
+}
+
+.launch-window-charge {
+  background: linear-gradient(90deg, rgba(0,229,255,0.16) 0%, rgba(255,255,255,0.26) 100%);
+  box-shadow: 0 0 18px rgba(0,229,255,0.18);
+}
+
+.launch-fill {
+  position: absolute;
+  inset: 2px auto 2px 2px;
+  background: linear-gradient(90deg, #00e5ff 0%, #ffe500 88%);
+  box-shadow: 0 0 16px rgba(0,229,255,0.24);
+}
+
+.launch-target-tag {
+  position: absolute;
+  top: -14px;
+  height: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  font-size: 6px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  color: rgba(255, 229, 0, 0.88);
+  background: rgba(255, 229, 0, 0.08);
+  border: 1px solid rgba(255, 229, 0, 0.24);
+  clip-path: polygon(5px 0, 100% 0, calc(100% - 5px) 100%, 0 100%);
+}
+
+.launch-target-tag-charge {
+  color: rgba(125, 249, 255, 0.92);
+  background: rgba(0, 229, 255, 0.08);
+  border-color: rgba(0, 229, 255, 0.24);
+}
+
+.launch-lane-note-row {
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 6px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.24);
+}
+
+.launch-cursor {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 4px;
+  margin-left: -2px;
+  background: #ffffff;
+  box-shadow: 0 0 16px rgba(255,255,255,0.58);
+}
+
+.launch-cursor.is-locked {
+  background: #ffe500;
+  box-shadow: 0 0 18px rgba(255,229,0,0.7);
+}
+
+.launch-grade-card {
+  min-width: 176px;
+  text-align: left;
+  padding: 12px 15px;
+  background: rgba(5,5,10,0.94);
+  border: 1px solid rgba(255,255,255,0.08);
+  clip-path: polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+  backdrop-filter: blur(12px);
+  transform: translate(-50%, calc(-100% - 18px));
+}
+
 .cb-ring-field {
   background:
     radial-gradient(circle at 50% 50%, rgba(72,48,182,0.10) 0%, rgba(5,5,8,0) 34%),
@@ -881,6 +1281,11 @@ onMounted(() => {
 .cb-result-leave-active { animation: cb-result-out 0.22s ease-in; }
 @keyframes cb-result-in  { from { opacity:0; transform:scale(0.82) translateY(10px); } to { opacity:1; transform:scale(1) translateY(0); } }
 @keyframes cb-result-out { from { opacity:1; } to { opacity:0; } }
+
+.launch-grade-pop-enter-active { animation: launch-grade-in 0.18s ease-out; }
+.launch-grade-pop-leave-active { animation: launch-grade-out 0.16s ease-in; }
+@keyframes launch-grade-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes launch-grade-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-6px); } }
 
 .spotlight-enter-active { animation: spotlight-in 0.2s ease-out; }
 @keyframes spotlight-in  { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }

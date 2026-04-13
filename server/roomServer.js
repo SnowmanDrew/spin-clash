@@ -32,6 +32,23 @@ function normalizeRecord(record) {
   }
 }
 
+function createEmptyLoadout() {
+  return {
+    layer: 'attack',
+    disc: 'assault',
+    driver: 'rush',
+  }
+}
+
+function normalizeLoadout(loadout, fallbackBuild = 'attack') {
+  const source = loadout || {}
+  return {
+    layer: String(source.layer || fallbackBuild || 'attack'),
+    disc: String(source.disc || 'assault'),
+    driver: String(source.driver || 'rush'),
+  }
+}
+
 function createEmptyOnlineStats() {
   return {
     version: 1,
@@ -213,6 +230,7 @@ function serialiseRoom(room) {
       id: player.id,
       name: player.name,
       build: player.build,
+      loadout: player.loadout,
       record: player.record,
       ready: player.ready,
       connected: player.connected,
@@ -287,6 +305,7 @@ function joinRoom(socket, roomId) {
     id: client.id,
     name: client.name,
     build: client.build,
+    loadout: client.loadout,
     record: client.record,
     ready: false,
     connected: true,
@@ -327,11 +346,13 @@ function updateProfile(socket, message) {
   if (!client || !room) return
   client.name = String(message.name || client.name).slice(0, 24) || 'Blader'
   client.build = message.build || client.build
+  client.loadout = normalizeLoadout(message.loadout || client.loadout, client.build)
   client.record = normalizeRecord(message.record || client.record)
   const roomPlayer = room.players.get(client.id)
   if (roomPlayer) {
     roomPlayer.name = client.name
     roomPlayer.build = client.build
+    roomPlayer.loadout = client.loadout
     roomPlayer.record = client.record
   }
   broadcastRoomState(room)
@@ -373,6 +394,7 @@ function startMatch(socket) {
     id: player.id,
     name: player.name,
     build: player.build,
+    loadout: player.loadout,
     record: player.record,
   }))
   for (const player of players) {
@@ -450,6 +472,7 @@ wss.on('connection', (socket) => {
     id,
     name: `Blader-${id.slice(0, 4)}`,
     build: 'attack',
+    loadout: createEmptyLoadout(),
     record: createEmptyRecord(),
     roomId: null,
   }
@@ -469,6 +492,7 @@ wss.on('connection', (socket) => {
       case 'set_identity': {
         client.name = String(message.name || client.name).slice(0, 24) || client.name
         client.build = message.build || client.build
+        client.loadout = normalizeLoadout(message.loadout || client.loadout, client.build)
         client.record = normalizeRecord(message.record || client.record)
         break
       }
