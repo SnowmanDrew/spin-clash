@@ -6,11 +6,14 @@ import { useBeybladeSimulation } from '../composables/useBeybladeSimulation.js'
 import snowverLogo from '../assets/snowverpowered.png'
 import { Anvil, Copy, Heart, Link2, Play, Radio, Users, Wifi, WifiOff, Zap } from 'lucide-vue-next'
 
+const PLAYER_ALIAS_STORAGE_KEY = 'spin-clash:player-alias'
+
 const mountRef = ref(null)
 const roomApi = useRoomConnection()
 
 const {
   selectedBuild,
+  playerRecord,
   menuMode,
   gamePhase,
   status,
@@ -34,6 +37,7 @@ watch(selectedBuild, () => {
 })
 
 watch(playerAlias, (name) => {
+  storePlayerAlias(name)
   if (roomApi.room.value) {
     roomApi.updateProfile({ name, build: selectedBuild.value })
   }
@@ -77,6 +81,34 @@ const controlsList = [
   ['Q', 'Ultimate when full'],
 ]
 
+function loadStoredPlayerAlias() {
+  if (typeof window === 'undefined') return 'Blader'
+  const storedAlias = window.localStorage.getItem(PLAYER_ALIAS_STORAGE_KEY)?.trim()
+  return storedAlias || 'Blader'
+}
+
+function storePlayerAlias(name) {
+  if (typeof window === 'undefined') return
+  const trimmedName = name.trim()
+  if (trimmedName) {
+    window.localStorage.setItem(PLAYER_ALIAS_STORAGE_KEY, trimmedName)
+    return
+  }
+  window.localStorage.removeItem(PLAYER_ALIAS_STORAGE_KEY)
+}
+
+function resolvePlayerAlias(name = playerAlias.value) {
+  return name.trim() || 'Blader'
+}
+
+function getRecordLine(record, matchType) {
+  const stats = record?.[matchType] || { wins: 0, losses: 0 }
+  return `${stats.wins}W-${stats.losses}L`
+}
+
+const activeRecordLabel = computed(() => menuMode.value === 'online' ? 'VS Player' : 'VS CPU')
+const activeRecordValue = computed(() => getRecordLine(playerRecord.value, menuMode.value === 'online' ? 'player' : 'cpu'))
+
 function onSpotlightAfterLeave() {
   displayBuild.value = selectedBuild.value
   cardVisible.value = true
@@ -106,13 +138,17 @@ function spotlightStyle(buildKey) {
 
 async function createRoom() {
   menuMode.value = 'online'
-  await roomApi.connectAndCreateRoom({ name: playerAlias.value, build: selectedBuild.value })
+  const name = resolvePlayerAlias()
+  playerAlias.value = name
+  await roomApi.connectAndCreateRoom({ name, build: selectedBuild.value, record: playerRecord.value })
 }
 
 async function joinRoom() {
   if (!joinCode.value.trim()) return
   menuMode.value = 'online'
-  await roomApi.connectAndJoinRoom({ roomId: joinCode.value.trim(), name: playerAlias.value, build: selectedBuild.value })
+  const name = resolvePlayerAlias()
+  playerAlias.value = name
+  await roomApi.connectAndJoinRoom({ roomId: joinCode.value.trim(), name, build: selectedBuild.value, record: playerRecord.value })
 }
 
 function toggleReady() {
@@ -138,7 +174,9 @@ async function copyShareLink() {
 
 function launchSingle() {
   menuMode.value = 'single'
-  launchSinglePlayerMatch(playerAlias.value.trim() || 'Player')
+  const name = resolvePlayerAlias()
+  playerAlias.value = name
+  launchSinglePlayerMatch(name)
 }
 
 function exitBattle() {
@@ -149,11 +187,12 @@ function exitBattle() {
 }
 
 onMounted(() => {
+  playerAlias.value = loadStoredPlayerAlias()
   const roomId = new URL(window.location.href).searchParams.get('room')
   if (roomId) {
     menuMode.value = 'online'
     joinCode.value = roomId
-    roomApi.connectAndJoinRoom({ roomId, name: playerAlias.value, build: selectedBuild.value })
+    roomApi.connectAndJoinRoom({ roomId, name: resolvePlayerAlias(), build: selectedBuild.value, record: playerRecord.value })
   }
 })
 </script>
@@ -297,7 +336,7 @@ onMounted(() => {
                 v-for="build in buildEntries"
                 :key="build.key"
                 @click="selectedBuild = build.key"
-                class="cb-card relative overflow-hidden p-3"
+                class="cb-card relative overflow-hidden px-3 py-2.5"
                 :class="{ 'is-selected': selectedBuild === build.key }"
                 :style="buildCardStyle(build, selectedBuild === build.key)"
               >
@@ -312,16 +351,17 @@ onMounted(() => {
                   <span class="text-[7px] uppercase tracking-[0.3em] font-bold px-1.5 py-0.5 leading-tight flex-shrink-0" :style="selectedBuild === build.key ? { color: build.color, border: `1px solid ${build.color}`, background: build.color + '1a', clipPath: 'polygon(4px 0%,100% 0%,calc(100% - 4px) 100%,0% 100%)' } : { color: 'rgba(255,255,255,0.22)', border: '1px solid rgba(255,255,255,0.1)', clipPath: 'polygon(4px 0%,100% 0%,calc(100% - 4px) 100%,0% 100%)' }">{{ selectedBuild === build.key ? 'Selected' : build.specialName }}</span>
                 </div>
 
-                <div class="text-[10px] text-white/32 leading-relaxed">{{ build.description }}</div>
-
-                <div v-if="selectedBuild === build.key" class="mt-3 space-y-1.5 border-t border-white/[0.06] pt-2.5">
-                  <div v-for="({ icon, val }) in [{ icon: Zap, val: build.stats.speed }, { icon: Anvil, val: build.stats.weight }, { icon: Heart, val: build.stats.stamina }]" :key="icon" class="flex items-center gap-2.5">
-                    <component :is="icon" class="w-4 h-4 flex-shrink-0 text-white/30" :stroke-width="2" />
-                    <div class="flex-1 h-[2px]" style="background:rgba(255,255,255,0.07)">
-                      <div class="h-full" :style="{ width: Math.round(val / 1.5 * 100) + '%', background: build.color, boxShadow: `0 0 5px ${build.color}88` }" />
+                <Transition name="build-details">
+                  <div v-if="selectedBuild === build.key" class="build-card-details space-y-2 border-t border-white/[0.06] pt-2">
+                    <div class="text-[10px] text-white/32 leading-relaxed">{{ build.description }}</div>
+                    <div v-for="({ icon, val }) in [{ icon: Zap, val: build.stats.speed }, { icon: Anvil, val: build.stats.weight }, { icon: Heart, val: build.stats.stamina }]" :key="icon" class="flex items-center gap-2.5">
+                      <component :is="icon" class="w-4 h-4 flex-shrink-0 text-white/30" :stroke-width="2" />
+                      <div class="flex-1 h-[2px]" style="background:rgba(255,255,255,0.07)">
+                        <div class="h-full" :style="{ width: Math.round(val / 1.5 * 100) + '%', background: build.color, boxShadow: `0 0 5px ${build.color}88` }" />
+                      </div>
                     </div>
                   </div>
-                </div>
+                </Transition>
               </button>
             </div>
 
@@ -390,6 +430,8 @@ onMounted(() => {
                   <div class="flex items-center gap-2 mb-3">
                     <Users class="w-4 h-4 text-[#FFE500]" />
                     <span class="text-[10px] uppercase tracking-[0.4em] text-white/35">{{ modeLabel }}</span>
+                    <span class="ml-auto text-[8px] uppercase tracking-[0.28em] text-white/30">{{ activeRecordLabel }}</span>
+                    <span class="text-[10px] font-black uppercase tracking-[0.18em] text-[#FFE500]">{{ activeRecordValue }}</span>
                   </div>
 
                   <label class="block mb-3">
@@ -398,13 +440,12 @@ onMounted(() => {
                   </label>
 
                   <template v-if="menuMode === 'single'">
-                    <p class="text-[12px] text-white/45 leading-relaxed mb-4">Keep the local arcade flow exactly as before: one blade, one CPU rival, first to two rounds.</p>
                     <button class="cb-btn-launch" @click="launchSingle">Launch Match</button>
                   </template>
 
                   <template v-else>
                     <template v-if="!roomId">
-                      <p class="text-[12px] text-white/45 leading-relaxed mb-4">Create a room, share the link, and run a host-authoritative free-for-all for up to four players.</p>
+                      <p class="text-[12px] text-white/45 leading-relaxed mb-4">Create a room, share the link, and run a free-for-all for up to four players.</p>
                       <div class="grid grid-cols-[1fr_auto] gap-2 mb-3">
                         <input v-model="joinCode" maxlength="12" class="cb-input uppercase" placeholder="Room Code" />
                         <button class="cb-chip cb-chip-cta" :disabled="!joinCode.trim()" @click="joinRoom">
@@ -436,10 +477,15 @@ onMounted(() => {
                           <div class="grid gap-2">
                             <div v-for="slot in 4" :key="slot" class="cb-slot">
                               <template v-if="roomPlayers[slot - 1]">
-                                <div class="flex items-center gap-2">
-                                  <div class="w-2 h-2" :style="{ background: BUILD_DEFS[roomPlayers[slot - 1].build].color, clipPath: 'polygon(50% 0,100% 50%,50% 100%,0 50%)' }" />
-                                  <span class="font-black uppercase tracking-[0.12em] text-[11px]">{{ roomPlayers[slot - 1].name }}</span>
-                                  <span class="text-[9px] text-white/35 uppercase">{{ BUILD_DEFS[roomPlayers[slot - 1].build].name }}</span>
+                                <div class="min-w-0">
+                                  <div class="flex items-center gap-2">
+                                    <div class="w-2 h-2" :style="{ background: BUILD_DEFS[roomPlayers[slot - 1].build].color, clipPath: 'polygon(50% 0,100% 50%,50% 100%,0 50%)' }" />
+                                    <span class="font-black uppercase tracking-[0.12em] text-[11px]">{{ roomPlayers[slot - 1].name }}</span>
+                                    <span class="text-[9px] text-white/35 uppercase">{{ BUILD_DEFS[roomPlayers[slot - 1].build].name }}</span>
+                                  </div>
+                                  <div class="mt-1 text-[8px] uppercase tracking-[0.16em] text-white/28">
+                                    PVP {{ getRecordLine(roomPlayers[slot - 1].record, 'player') }}
+                                  </div>
                                 </div>
                                 <span class="text-[9px] uppercase tracking-[0.25em]" :class="roomPlayers[slot - 1].ready ? 'text-[#FFE500]' : 'text-white/30'">{{ roomPlayers[slot - 1].ready ? 'Ready' : 'Waiting' }}</span>
                               </template>
@@ -493,6 +539,33 @@ onMounted(() => {
 .cb-card.is-selected {
   background: #10101a;
   transform: scaleX(1.015);
+}
+
+.build-card-details {
+  overflow: hidden;
+  transform-origin: top;
+}
+
+.build-details-enter-active,
+.build-details-leave-active {
+  transition: max-height 0.24s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.18s ease, transform 0.22s ease, margin-top 0.22s ease, padding-top 0.22s ease, border-color 0.18s ease;
+}
+
+.build-details-enter-from,
+.build-details-leave-to {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-6px) scaleY(0.96);
+  margin-top: 0;
+  padding-top: 0;
+  border-color: transparent;
+}
+
+.build-details-enter-to,
+.build-details-leave-from {
+  max-height: 160px;
+  opacity: 1;
+  transform: translateY(0) scaleY(1);
 }
 
 .cb-card:focus-visible {

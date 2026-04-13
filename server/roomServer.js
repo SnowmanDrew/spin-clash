@@ -1,10 +1,198 @@
 import { createServer } from 'node:http'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { WebSocketServer } from 'ws'
 
 const PORT = Number(process.env.PORT || 8787)
 const rooms = new Map()
 const clients = new Map()
+const STATS_PATH = join(process.cwd(), 'server', 'online-stats.json')
+
+function createEmptyRecord() {
+  return {
+    cpu: { wins: 0, losses: 0 },
+    player: { wins: 0, losses: 0 },
+  }
+}
+
+function normalizeRecord(record) {
+  const source = record || {}
+  const cpu = source.cpu || {}
+  const player = source.player || {}
+  return {
+    cpu: {
+      wins: Math.max(0, Number(cpu.wins) || 0),
+      losses: Math.max(0, Number(cpu.losses) || 0),
+    },
+    player: {
+      wins: Math.max(0, Number(player.wins) || 0),
+      losses: Math.max(0, Number(player.losses) || 0),
+    },
+  }
+}
+
+function createEmptyOnlineStats() {
+  return {
+    version: 1,
+    updatedAt: null,
+    totals: {
+      matchesCompleted: 0,
+      matchesCancelled: 0,
+      ringOutFinishes: 0,
+      spinOutFinishes: 0,
+    },
+    builds: {},
+    players: {},
+    recentMatches: [],
+  }
+}
+
+function normalizeStatCounter(value) {
+  return Math.max(0, Number(value) || 0)
+}
+
+function createEmptyBuildStats() {
+  return {
+    matches: 0,
+    wins: 0,
+    losses: 0,
+  }
+}
+
+function createEmptyPlayerStats(name = 'Unknown') {
+  return {
+    name,
+    matches: 0,
+    wins: 0,
+    losses: 0,
+    lastSeenAt: null,
+    builds: {},
+  }
+}
+
+function normalizeOnlineStats(stats) {
+  const source = stats || {}
+  const normalized = createEmptyOnlineStats()
+  normalized.updatedAt = typeof source.updatedAt === 'string' ? source.updatedAt : null
+  normalized.totals.matchesCompleted = normalizeStatCounter(source.totals?.matchesCompleted)
+  normalized.totals.matchesCancelled = normalizeStatCounter(source.totals?.matchesCancelled)
+  normalized.totals.ringOutFinishes = normalizeStatCounter(source.totals?.ringOutFinishes)
+  normalized.totals.spinOutFinishes = normalizeStatCounter(source.totals?.spinOutFinishes)
+
+  for (const [buildKey, buildStats] of Object.entries(source.builds || {})) {
+    normalized.builds[buildKey] = {
+      matches: normalizeStatCounter(buildStats?.matches),
+      wins: normalizeStatCounter(buildStats?.wins),
+      losses: normalizeStatCounter(buildStats?.losses),
+    }
+  }
+
+  for (const [playerId, playerStats] of Object.entries(source.players || {})) {
+    const normalizedPlayer = createEmptyPlayerStats(playerStats?.name || playerId)
+    normalizedPlayer.matches = normalizeStatCounter(playerStats?.matches)
+    normalizedPlayer.wins = normalizeStatCounter(playerStats?.wins)
+    normalizedPlayer.losses = normalizeStatCounter(playerStats?.losses)
+    normalizedPlayer.lastSeenAt = typeof playerStats?.lastSeenAt === 'string' ? playerStats.lastSeenAt : null
+    for (const [buildKey, buildStats] of Object.entries(playerStats?.builds || {})) {
+      normalizedPlayer.builds[buildKey] = {
+        matches: normalizeStatCounter(buildStats?.matches),
+        wins: normalizeStatCounter(buildStats?.wins),
+        losses: normalizeStatCounter(buildStats?.losses),
+      }
+    }
+    normalized.players[playerId] = normalizedPlayer
+  }
+
+  normalized.recentMatches = Array.isArray(source.recentMatches)
+    ? source.recentMatches.slice(0, 25)
+    : []
+
+  return normalized
+}
+
+function loadOnlineStats() {
+  if (!existsSync(STATS_PATH)) return createEmptyOnlineStats()
+  try {
+    return normalizeOnlineStats(JSON.parse(readFileSync(STATS_PATH, 'utf8')))
+  } catch {
+    return createEmptyOnlineStats()
+  }
+}
+
+function saveOnlineStats(stats) {
+  const normalized = normalizeOnlineStats(stats)
+  normalized.updatedAt = new Date().toISOString()
+  writeFileSync(STATS_PATH, JSON.stringify(normalized, null, 2))
+  return normalized
+}
+
+function ensureBuildStats(target, buildKey) {
+  target[buildKey] ||= createEmptyBuildStats()
+  return target[buildKey]
+}
+
+function ensurePlayerStats(target, playerId, name) {
+  target[playerId] ||= createEmptyPlayerStats(name)
+  if (name) target[playerId].name = name
+  return target[playerId]
+}
+
+function normalizeFinishType(value) {
+  return value === 'Ring Out' ? 'ringOut' : 'spinOut'
+}
+
+function recordCompletedOnlineMatch(summary) {
+  if (!summary?.winnerId || !Array.isArray(summary.participants)) return
+  const stats = loadOnlineStats()
+  const winnerId = summary.winnerId
+  const finishKey = normalizeFinishType(summary.finishType)
+  stats.totals.matchesCompleted += 1
+  stats.totals[finishKey === 'ringOut' ? 'ringOutFinishes' : 'spinOutFinishes'] += 1
+
+  for (const participant of summary.participants) {
+    const playerStats = ensurePlayerStats(stats.players, participant.id, participant.name)
+    playerStats.matches += 1
+    playerStats.lastSeenAt = summary.completedAt || new Date().toISOString()
+    const playerBuildStats = ensureBuildStats(playerStats.builds, participant.build)
+    playerBuildStats.matches += 1
+
+    const buildStats = ensureBuildStats(stats.builds, participant.build)
+    buildStats.matches += 1
+
+    if (participant.id === winnerId) {
+      playerStats.wins += 1
+      playerBuildStats.wins += 1
+      buildStats.wins += 1
+    } else {
+      playerStats.losses += 1
+      playerBuildStats.losses += 1
+      buildStats.losses += 1
+    }
+  }
+
+  stats.recentMatches.unshift({
+    completedAt: summary.completedAt || new Date().toISOString(),
+    outcome: summary.outcome || 'Match finished.',
+    finishType: summary.finishType || 'Spin Out',
+    winnerId,
+    participants: summary.participants.map((participant) => ({
+      id: participant.id,
+      name: participant.name,
+      build: participant.build,
+      score: normalizeStatCounter(participant.score),
+    })),
+  })
+  stats.recentMatches = stats.recentMatches.slice(0, 25)
+
+  saveOnlineStats(stats)
+}
+
+function recordCancelledOnlineMatch() {
+  const stats = loadOnlineStats()
+  stats.totals.matchesCancelled += 1
+  saveOnlineStats(stats)
+}
 
 function makeRoomCode() {
   return randomBytes(3).toString('hex').toUpperCase()
@@ -25,6 +213,7 @@ function serialiseRoom(room) {
       id: player.id,
       name: player.name,
       build: player.build,
+      record: player.record,
       ready: player.ready,
       connected: player.connected,
     })),
@@ -98,6 +287,7 @@ function joinRoom(socket, roomId) {
     id: client.id,
     name: client.name,
     build: client.build,
+    record: client.record,
     ready: false,
     connected: true,
     socket,
@@ -137,10 +327,12 @@ function updateProfile(socket, message) {
   if (!client || !room) return
   client.name = String(message.name || client.name).slice(0, 24) || 'Blader'
   client.build = message.build || client.build
+  client.record = normalizeRecord(message.record || client.record)
   const roomPlayer = room.players.get(client.id)
   if (roomPlayer) {
     roomPlayer.name = client.name
     roomPlayer.build = client.build
+    roomPlayer.record = client.record
   }
   broadcastRoomState(room)
 }
@@ -181,6 +373,7 @@ function startMatch(socket) {
     id: player.id,
     name: player.name,
     build: player.build,
+    record: player.record,
   }))
   for (const player of players) {
     send(player.socket, 'match_started', {
@@ -226,6 +419,8 @@ function completeMatch(socket, message) {
   if (!client || !room || room.hostId !== client.id) return
   room.matchActive = false
   room.statusText = message.statusText || 'Match finished.'
+  if (message.summary?.winnerId) recordCompletedOnlineMatch(message.summary)
+  else recordCancelledOnlineMatch()
   for (const player of room.players.values()) {
     player.ready = false
   }
@@ -236,6 +431,11 @@ const server = createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ ok: true, rooms: rooms.size }))
+    return
+  }
+  if (req.url === '/stats') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(loadOnlineStats(), null, 2))
     return
   }
   res.writeHead(404)
@@ -250,6 +450,7 @@ wss.on('connection', (socket) => {
     id,
     name: `Blader-${id.slice(0, 4)}`,
     build: 'attack',
+    record: createEmptyRecord(),
     roomId: null,
   }
   clients.set(socket, client)
@@ -268,6 +469,7 @@ wss.on('connection', (socket) => {
       case 'set_identity': {
         client.name = String(message.name || client.name).slice(0, 24) || client.name
         client.build = message.build || client.build
+        client.record = normalizeRecord(message.record || client.record)
         break
       }
       case 'create_room':

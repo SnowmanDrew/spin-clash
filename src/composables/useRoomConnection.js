@@ -1,5 +1,28 @@
 import { computed, onUnmounted, ref } from 'vue'
 
+function createEmptyRecord() {
+  return {
+    cpu: { wins: 0, losses: 0 },
+    player: { wins: 0, losses: 0 },
+  }
+}
+
+function normalizeRecord(record) {
+  const source = record || {}
+  const cpu = source.cpu || {}
+  const player = source.player || {}
+  return {
+    cpu: {
+      wins: Math.max(0, Number(cpu.wins) || 0),
+      losses: Math.max(0, Number(cpu.losses) || 0),
+    },
+    player: {
+      wins: Math.max(0, Number(player.wins) || 0),
+      losses: Math.max(0, Number(player.losses) || 0),
+    },
+  }
+}
+
 function getDefaultSocketUrl() {
   if (import.meta.env.VITE_MULTIPLAYER_WS_URL) {
     return import.meta.env.VITE_MULTIPLAYER_WS_URL
@@ -22,10 +45,15 @@ export function useRoomConnection() {
   const errorMessage = ref('')
   const clientId = ref('')
   const playerName = ref('')
+  const playerRecord = ref(createEmptyRecord())
   const room = ref(null)
   const latestSnapshot = ref(null)
   const latestMatchConfig = ref(null)
   const remoteInput = ref(null)
+
+  function normalizePlayerName(name) {
+    return String(name || '').trim() || 'Blader'
+  }
 
   function send(type, payload = {}) {
     if (!socket.value || socket.value.readyState !== WebSocket.OPEN) return false
@@ -65,8 +93,8 @@ export function useRoomConnection() {
       switch (message.type) {
         case 'welcome':
           clientId.value = message.clientId
-          playerName.value = playerName.value || message.playerName || 'Blader'
-          send('set_identity', { name: playerName.value, build: 'attack' })
+          playerName.value = normalizePlayerName(playerName.value || message.playerName)
+          send('set_identity', { name: playerName.value, build: 'attack', record: playerRecord.value })
           break
         case 'room_state':
           room.value = message.room
@@ -131,27 +159,30 @@ export function useRoomConnection() {
     return connectionState.value === 'connected'
   }
 
-  async function connectAndCreateRoom({ name, build }) {
-    playerName.value = name
+  async function connectAndCreateRoom({ name, build, record = playerRecord.value }) {
+    playerName.value = normalizePlayerName(name)
+    playerRecord.value = normalizeRecord(record)
     const ok = await ensureConnected()
     if (!ok) return false
-    send('set_identity', { name, build })
+    send('set_identity', { name: playerName.value, build, record: playerRecord.value })
     send('create_room')
     return true
   }
 
-  async function connectAndJoinRoom({ roomId, name, build }) {
-    playerName.value = name
+  async function connectAndJoinRoom({ roomId, name, build, record = playerRecord.value }) {
+    playerName.value = normalizePlayerName(name)
+    playerRecord.value = normalizeRecord(record)
     const ok = await ensureConnected()
     if (!ok) return false
-    send('set_identity', { name, build })
+    send('set_identity', { name: playerName.value, build, record: playerRecord.value })
     send('join_room', { roomId: roomId.toUpperCase() })
     return true
   }
 
-  function updateProfile({ name, build }) {
-    if (name) playerName.value = name
-    send('update_profile', { name: playerName.value, build })
+  function updateProfile({ name, build, record }) {
+    playerName.value = normalizePlayerName(name || playerName.value)
+    playerRecord.value = normalizeRecord(record || playerRecord.value)
+    send('update_profile', { name: playerName.value, build, record: playerRecord.value })
   }
 
   function setReady(ready) {
@@ -178,8 +209,8 @@ export function useRoomConnection() {
     send('snapshot', { snapshot })
   }
 
-  function sendMatchComplete(statusText) {
-    send('match_complete', { statusText })
+  function sendMatchComplete(statusText, summary = null) {
+    send('match_complete', { statusText, summary })
   }
 
   const roomId = computed(() => room.value?.id || '')
@@ -200,6 +231,7 @@ export function useRoomConnection() {
     errorMessage,
     clientId,
     playerName,
+    playerRecord,
     room,
     roomId,
     shareUrl,

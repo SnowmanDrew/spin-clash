@@ -39,6 +39,16 @@ export const BUILD_DEFS = {
     specialName: 'Vampire Drain',
     specialDescription: 'Ignites the blade edge with violet energy and tears spin out of struck opponents in arcing siphon bursts.',
   },
+  trick: {
+    key: 'trick',
+    name: 'Trick',
+    color: '#d9ff57',
+    accent: '#7df9ff',
+    description: 'Deceptive and slippery. Built to fake lanes, break targeting, and turn committed hits into awkward whiffs and counter angles.',
+    stats: { speed: 1.08, weight: 0.88, stamina: 0.96, grip: 1.18, smash: 0.86, defense: 0.92 },
+    specialName: 'Phantom Step',
+    specialDescription: 'Enters a mirage state that chains sideways feints, dodges committed hits, and snaps back with deceptive counter angles.',
+  },
 }
 
-export const CPU_BUILD_ORDER = ['attack', 'defense', 'stamina', 'rubber']
+export const CPU_BUILD_ORDER = ['attack', 'defense', 'stamina', 'rubber', 'trick']

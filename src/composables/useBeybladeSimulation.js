@@ -76,6 +76,31 @@ const RUBBER_SPECIAL = {
   pulseDuration: 0.18,
 }
 
+const TRICK_SPECIAL = {
+  duration: 2.45,
+  stepCooldown: 0.34,
+  dodgeDuration: 0.2,
+  counterDuration: 0.54,
+  pulseDuration: 0.18,
+  echoDuration: 0.52,
+  stepDistance: 0.78,
+  forwardCarryDistance: 0.08,
+  stepVelocity: 5.2,
+  forwardCarryVelocity: 0.16,
+  passiveDrainMultiplier: 0.84,
+  controlBoost: 1.24,
+  dodgePushAbsorb: 0.28,
+  dodgeSpinAbsorb: 0.42,
+  counterPushBonus: 0.82,
+  counterPushImpactScale: 0.3,
+  counterSpinBonus: 0.42,
+  counterSpinImpactScale: 0.12,
+  maxTargetDist: 5.2,
+  safeEdgeBuffer: 1.1,
+  inwardBiasDistance: 0.44,
+  edgeOutwardDamping: 0.9,
+}
+
 const CPU_LAUNCH = {
   baseCharge: 0.72,
   chargeVariance: 0.12,
@@ -85,10 +110,14 @@ const CPU_LAUNCH = {
     defense: { baseCharge: 0.68, chargeVariance: 0.09, angleVariance: 0.13 },
     stamina: { baseCharge: 0.7, chargeVariance: 0.08, angleVariance: 0.16 },
     rubber: { baseCharge: 0.74, chargeVariance: 0.1, angleVariance: 0.2 },
+    trick: { baseCharge: 0.76, chargeVariance: 0.11, angleVariance: 0.24 },
   },
 }
 
 const ATTACK_UI_RENDER_ORDER = 120
+const SELECTED_BUILD_STORAGE_KEY = 'spin-clash:selected-build'
+const PLAYER_RECORD_STORAGE_KEY = 'spin-clash:player-record'
+const PLAYER_STATS_STORAGE_KEY = 'spin-clash:player-stats'
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const tmpSurfaceNormal = new THREE.Vector3()
@@ -404,10 +433,129 @@ function createRubberDrainTrail(color) {
   return line
 }
 
+function createTrickMirage(color, accent) {
+  const mirage = new THREE.Group()
+  const materials = []
+
+  const core = new THREE.Mesh(
+    new THREE.TorusGeometry(0.78, 0.045, 8, 36),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  core.rotation.x = Math.PI / 2
+  mirage.add(core)
+  materials.push(core.material)
+
+  const arcMeshes = []
+  for (let index = 0; index < 3; index += 1) {
+    const arc = new THREE.Mesh(
+      new THREE.TorusGeometry(0.94, 0.035, 8, 28, Math.PI * 0.42),
+      new THREE.MeshBasicMaterial({
+        color: index === 1 ? 0xf7ff93 : accent,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    )
+    arc.rotation.x = Math.PI / 2
+    arc.rotation.z = index * (Math.PI * 2 / 3) + 0.4
+    arc.position.y = 0.02 + index * 0.01
+    mirage.add(arc)
+    arcMeshes.push(arc)
+    materials.push(arc.material)
+  }
+
+  const shardMeshes = []
+  for (let index = 0; index < 3; index += 1) {
+    const shard = new THREE.Mesh(
+      new THREE.BoxGeometry(0.44, 0.035, 0.14),
+      new THREE.MeshBasicMaterial({
+        color: accent,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    )
+    shard.position.y = 0.12
+    mirage.add(shard)
+    shardMeshes.push(shard)
+    materials.push(shard.material)
+  }
+
+  mirage.userData.materials = materials
+  mirage.userData.arcMeshes = arcMeshes
+  mirage.userData.shardMeshes = shardMeshes
+  return mirage
+}
+
+function createTrickEchoes(color, accent) {
+  const echoes = new THREE.Group()
+  const states = []
+  for (let index = 0; index < 3; index += 1) {
+    const mesh = new THREE.Mesh(
+      new THREE.RingGeometry(0.56, 0.98, 28),
+      new THREE.MeshBasicMaterial({
+        color: index === 1 ? accent : color,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    )
+    mesh.rotation.x = -Math.PI / 2
+    mesh.visible = false
+    echoes.add(mesh)
+    states.push({ mesh, material: mesh.material, life: 0, baseScale: 1 })
+  }
+  echoes.userData.echoes = states
+  return echoes
+}
+
+function createTrickFlash(accent) {
+  const flash = new THREE.Mesh(
+    new THREE.RingGeometry(0.52, 1.18, 36),
+    new THREE.MeshBasicMaterial({
+      color: accent,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  flash.rotation.x = -Math.PI / 2
+  flash.visible = false
+  return flash
+}
+
 function setMarkerOpacity(marker, opacity) {
   for (const material of marker.userData.materials || []) {
     material.opacity = opacity
   }
+}
+
+function spawnTrickEcho(blade, x, z, scale = 1) {
+  const echoes = blade.trickEchoes?.userData?.echoes || []
+  if (!echoes.length) return
+  const echo = echoes[blade.trickEchoCursor % echoes.length]
+  blade.trickEchoCursor = (blade.trickEchoCursor + 1) % echoes.length
+  echo.life = TRICK_SPECIAL.echoDuration
+  echo.baseScale = scale
+  echo.mesh.visible = true
+  echo.mesh.position.set(x, getSurfaceYAtXZ(x, z, 0.03), z)
+  echo.mesh.scale.setScalar(scale)
+  echo.material.opacity = 0.34
 }
 
 function hideBladeEffects(blade) {
@@ -475,6 +623,22 @@ function hideBladeEffects(blade) {
   if (blade.rubberDrainTrail) {
     blade.rubberDrainTrail.visible = false
     blade.rubberDrainTrail.material.opacity = 0
+  }
+  if (blade.trickMirage) {
+    blade.trickMirage.visible = false
+    setMarkerOpacity(blade.trickMirage, 0)
+  }
+  if (blade.trickFlash) {
+    blade.trickFlash.visible = false
+    blade.trickFlash.material.opacity = 0
+  }
+  if (blade.trickEchoes) {
+    blade.trickEchoes.visible = false
+    for (const echo of blade.trickEchoes.userData.echoes || []) {
+      echo.life = 0
+      echo.mesh.visible = false
+      echo.material.opacity = 0
+    }
   }
 }
 
@@ -549,10 +713,150 @@ function rollCpuLaunchProfile(blade) {
   blade.cpuLaunchAngle = blade.spawn.angle + (Math.random() * 2 - 1) * profile.angleVariance
 }
 
+function createEmptyPlayerRecord() {
+  return {
+    cpu: { wins: 0, losses: 0 },
+    player: { wins: 0, losses: 0 },
+  }
+}
+
+function createEmptyBladeLifetimeStats() {
+  return {
+    matchesPlayed: 0,
+    matchesWon: 0,
+    matchesLost: 0,
+    roundsWon: 0,
+    roundsLost: 0,
+    ultsUsed: 0,
+    ringOutWins: 0,
+    spinOutWins: 0,
+    ringOutLosses: 0,
+    spinOutLosses: 0,
+  }
+}
+
+function createEmptyPlayerStats() {
+  const blades = Object.fromEntries(Object.keys(BUILD_DEFS).map((key) => [key, createEmptyBladeLifetimeStats()]))
+  return {
+    matchesPlayed: 0,
+    matchesWon: 0,
+    matchesLost: 0,
+    roundsWon: 0,
+    roundsLost: 0,
+    ultsUsed: 0,
+    finishWins: { ringOut: 0, spinOut: 0 },
+    finishLosses: { ringOut: 0, spinOut: 0 },
+    modes: {
+      cpu: { matchesPlayed: 0, matchesWon: 0, matchesLost: 0 },
+      player: { matchesPlayed: 0, matchesWon: 0, matchesLost: 0 },
+    },
+    blades,
+  }
+}
+
+function normalizePlayerRecord(record) {
+  const source = record || {}
+  const cpu = source.cpu || {}
+  const player = source.player || {}
+  return {
+    cpu: {
+      wins: Math.max(0, Number(cpu.wins) || 0),
+      losses: Math.max(0, Number(cpu.losses) || 0),
+    },
+    player: {
+      wins: Math.max(0, Number(player.wins) || 0),
+      losses: Math.max(0, Number(player.losses) || 0),
+    },
+  }
+}
+
+function normalizePlayerStats(stats) {
+  const source = stats || {}
+  const normalized = createEmptyPlayerStats()
+  normalized.matchesPlayed = Math.max(0, Number(source.matchesPlayed) || 0)
+  normalized.matchesWon = Math.max(0, Number(source.matchesWon) || 0)
+  normalized.matchesLost = Math.max(0, Number(source.matchesLost) || 0)
+  normalized.roundsWon = Math.max(0, Number(source.roundsWon) || 0)
+  normalized.roundsLost = Math.max(0, Number(source.roundsLost) || 0)
+  normalized.ultsUsed = Math.max(0, Number(source.ultsUsed) || 0)
+  normalized.finishWins.ringOut = Math.max(0, Number(source.finishWins?.ringOut) || 0)
+  normalized.finishWins.spinOut = Math.max(0, Number(source.finishWins?.spinOut) || 0)
+  normalized.finishLosses.ringOut = Math.max(0, Number(source.finishLosses?.ringOut) || 0)
+  normalized.finishLosses.spinOut = Math.max(0, Number(source.finishLosses?.spinOut) || 0)
+  for (const mode of ['cpu', 'player']) {
+    normalized.modes[mode].matchesPlayed = Math.max(0, Number(source.modes?.[mode]?.matchesPlayed) || 0)
+    normalized.modes[mode].matchesWon = Math.max(0, Number(source.modes?.[mode]?.matchesWon) || 0)
+    normalized.modes[mode].matchesLost = Math.max(0, Number(source.modes?.[mode]?.matchesLost) || 0)
+  }
+  for (const bladeKey of Object.keys(BUILD_DEFS)) {
+    const bladeSource = source.blades?.[bladeKey] || {}
+    normalized.blades[bladeKey] = {
+      matchesPlayed: Math.max(0, Number(bladeSource.matchesPlayed) || 0),
+      matchesWon: Math.max(0, Number(bladeSource.matchesWon) || 0),
+      matchesLost: Math.max(0, Number(bladeSource.matchesLost) || 0),
+      roundsWon: Math.max(0, Number(bladeSource.roundsWon) || 0),
+      roundsLost: Math.max(0, Number(bladeSource.roundsLost) || 0),
+      ultsUsed: Math.max(0, Number(bladeSource.ultsUsed) || 0),
+      ringOutWins: Math.max(0, Number(bladeSource.ringOutWins) || 0),
+      spinOutWins: Math.max(0, Number(bladeSource.spinOutWins) || 0),
+      ringOutLosses: Math.max(0, Number(bladeSource.ringOutLosses) || 0),
+      spinOutLosses: Math.max(0, Number(bladeSource.spinOutLosses) || 0),
+    }
+  }
+  return normalized
+}
+
+function normalizeFinishStatKey(value) {
+  return value === 'ring_out' || value === 'Ring Out' || value === 'ringOut' ? 'ringOut' : 'spinOut'
+}
+
+function loadStoredBuild() {
+  if (typeof window === 'undefined') return 'attack'
+  const storedBuild = window.localStorage.getItem(SELECTED_BUILD_STORAGE_KEY)
+  return storedBuild && BUILD_DEFS[storedBuild] ? storedBuild : 'attack'
+}
+
+function storeSelectedBuild(build) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(SELECTED_BUILD_STORAGE_KEY, build)
+}
+
+function loadStoredPlayerRecord() {
+  if (typeof window === 'undefined') return createEmptyPlayerRecord()
+  try {
+    const storedRecord = window.localStorage.getItem(PLAYER_RECORD_STORAGE_KEY)
+    return storedRecord ? normalizePlayerRecord(JSON.parse(storedRecord)) : createEmptyPlayerRecord()
+  } catch {
+    return createEmptyPlayerRecord()
+  }
+}
+
+function storePlayerRecord(record) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(PLAYER_RECORD_STORAGE_KEY, JSON.stringify(normalizePlayerRecord(record)))
+}
+
+function loadStoredPlayerStats() {
+  if (typeof window === 'undefined') return createEmptyPlayerStats()
+  try {
+    const storedStats = window.localStorage.getItem(PLAYER_STATS_STORAGE_KEY)
+    return storedStats ? normalizePlayerStats(JSON.parse(storedStats)) : createEmptyPlayerStats()
+  } catch {
+    return createEmptyPlayerStats()
+  }
+}
+
+function storePlayerStats(stats) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(PLAYER_STATS_STORAGE_KEY, JSON.stringify(normalizePlayerStats(stats)))
+}
+
 export function useBeybladeSimulation(mountRef, roomApi = null) {
   const { beep, noiseBurst } = useAudio()
 
-  const selectedBuild = ref('attack')
+  const selectedBuild = ref(loadStoredBuild())
+  const playerRecord = ref(loadStoredPlayerRecord())
+  const playerStats = ref(loadStoredPlayerStats())
   const menuMode = ref('single')
   const gamePhase = ref('menu')
   const status = ref('Choose your blade, then launch into battle.')
@@ -568,6 +872,97 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
   let keyCleanup = null
   const pressedKeys = new Set()
   const queuedActions = { special: false }
+
+  function updatePlayerStats(mutator) {
+    const nextStats = normalizePlayerStats(playerStats.value)
+    mutator(nextStats)
+    playerStats.value = nextStats
+    storePlayerStats(nextStats)
+  }
+
+  function commitPlayerRecord(matchType, didWin) {
+    const nextRecord = normalizePlayerRecord(playerRecord.value)
+    nextRecord[matchType][didWin ? 'wins' : 'losses'] += 1
+    playerRecord.value = nextRecord
+    storePlayerRecord(nextRecord)
+    if (roomApi?.room?.value) {
+      roomApi.updateProfile({
+        name: roomApi.playerName.value,
+        build: selectedBuild.value,
+        record: nextRecord,
+      })
+    }
+  }
+
+  function commitRoundStats(runtimeState, winnerId, finishType, localDeathType = null) {
+    if (runtimeState.lastRecordedRound === runtimeState.round) return
+    const didWin = winnerId === runtimeState.localPlayerId
+    const finishKey = normalizeFinishStatKey(didWin ? finishType : localDeathType)
+    updatePlayerStats((stats) => {
+      stats[didWin ? 'roundsWon' : 'roundsLost'] += 1
+      const bladeStats = stats.blades[runtimeState.localBuildKey] || createEmptyBladeLifetimeStats()
+      bladeStats[didWin ? 'roundsWon' : 'roundsLost'] += 1
+      if (didWin) {
+        stats.finishWins[finishKey] += 1
+        bladeStats[finishKey === 'ringOut' ? 'ringOutWins' : 'spinOutWins'] += 1
+      } else {
+        stats.finishLosses[finishKey] += 1
+        bladeStats[finishKey === 'ringOut' ? 'ringOutLosses' : 'spinOutLosses'] += 1
+      }
+      stats.blades[runtimeState.localBuildKey] = bladeStats
+    })
+    runtimeState.lastRecordedRound = runtimeState.round
+  }
+
+  function commitUltUse(buildKey) {
+    updatePlayerStats((stats) => {
+      stats.ultsUsed += 1
+      const bladeStats = stats.blades[buildKey] || createEmptyBladeLifetimeStats()
+      bladeStats.ultsUsed += 1
+      stats.blades[buildKey] = bladeStats
+    })
+  }
+
+  function commitDetailedMatchStats(runtimeState, didWin) {
+    updatePlayerStats((stats) => {
+      stats.matchesPlayed += 1
+      stats[didWin ? 'matchesWon' : 'matchesLost'] += 1
+      stats.modes[runtimeState.matchStatKey].matchesPlayed += 1
+      stats.modes[runtimeState.matchStatKey][didWin ? 'matchesWon' : 'matchesLost'] += 1
+      const bladeStats = stats.blades[runtimeState.localBuildKey] || createEmptyBladeLifetimeStats()
+      bladeStats.matchesPlayed += 1
+      bladeStats[didWin ? 'matchesWon' : 'matchesLost'] += 1
+      stats.blades[runtimeState.localBuildKey] = bladeStats
+    })
+  }
+
+  function commitMatchRecord(runtimeState, winnerId) {
+    if (runtimeState.recordCommitted) return
+    const didWin = winnerId === runtimeState.localPlayerId
+    commitPlayerRecord(runtimeState.matchStatKey, didWin)
+    commitDetailedMatchStats(runtimeState, didWin)
+    runtimeState.recordCommitted = true
+  }
+
+  function buildOnlineMatchSummary(runtimeState) {
+    if (!runtimeState.networked || !roundResult.value?.winner) return null
+    return {
+      completedAt: new Date().toISOString(),
+      roomType: runtimeState.type,
+      scoreToWin: runtimeState.scoreToWin,
+      round: runtimeState.round,
+      winnerId: roundResult.value.winner,
+      outcome: roundResult.value.outcome,
+      finishType: roundResult.value.type,
+      scores: { ...runtimeState.scores },
+      participants: runtimeState.participants.map((participant) => ({
+        id: participant.id,
+        name: participant.name,
+        build: participant.build,
+        score: runtimeState.scores[participant.id] || 0,
+      })),
+    }
+  }
 
   function readLocalInput() {
     const input = {
@@ -657,6 +1052,11 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
           rubberDrainBurst: blade.rubberDrainBurst,
           rubberDrainTargetId: blade.rubberDrainTargetId,
           rubberDrainPulse: blade.rubberDrainPulse,
+          trickPhantomTimer: blade.trickPhantomTimer,
+          trickStepCooldown: blade.trickStepCooldown,
+          trickDodgeTimer: blade.trickDodgeTimer,
+          trickCounterTimer: blade.trickCounterTimer,
+          trickPulseTimer: blade.trickPulseTimer,
           defenseReflectFlash: blade.defenseReflectFlash,
           smashWindow: blade.smashWindow,
           attackLockTimer: blade.attackLockTimer,
@@ -904,6 +1304,54 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       setMarkerOpacity(blade.defenseShield, 0)
       blade.defenseShieldBurst.material.opacity = 0
     }
+
+    const trickEchoStates = blade.trickEchoes.userData.echoes || []
+    const trickEchoActive = trickEchoStates.some((echo) => echo.life > 0)
+    blade.trickEchoes.visible = trickEchoActive
+    for (const echo of trickEchoStates) {
+      const ratio = clamp01(echo.life / TRICK_SPECIAL.echoDuration)
+      echo.mesh.visible = ratio > 0.001
+      if (echo.mesh.visible) {
+        echo.material.opacity = ratio * 0.34
+        echo.mesh.scale.setScalar((echo.baseScale || 1) * (1.04 + (1 - ratio) * 0.26))
+      } else {
+        echo.material.opacity = 0
+      }
+    }
+
+    const trickActive = blade.key === 'trick' && blade.alive && (blade.trickPhantomTimer > 0 || blade.trickPulseTimer > 0 || trickEchoActive)
+    blade.trickMirage.visible = trickActive
+    blade.trickFlash.visible = blade.key === 'trick' && blade.alive && blade.trickPulseTimer > 0
+    if (trickActive) {
+      const phantomRatio = clamp01(blade.trickPhantomTimer / TRICK_SPECIAL.duration)
+      const pulseProgress = blade.trickPulseTimer > 0
+        ? 1 - clamp01(blade.trickPulseTimer / TRICK_SPECIAL.pulseDuration)
+        : 1
+      const pulse = 1 + Math.sin(now * 0.034 + t.x * 0.7 + t.z * 0.45) * 0.08
+      blade.trickMirage.position.set(t.x, surfaceY + STADIUM.bladeLift, t.z)
+      blade.trickMirage.quaternion.copy(blade.mesh.quaternion)
+      blade.trickMirage.scale.setScalar((0.98 + phantomRatio * 0.1 + (1 - pulseProgress) * 0.14) * pulse)
+      setMarkerOpacity(blade.trickMirage, 0.16 + phantomRatio * 0.16 + (1 - pulseProgress) * 0.18)
+      blade.trickMirage.userData.arcMeshes.forEach((mesh, index) => {
+        mesh.rotation.z = now * (0.0024 + index * 0.0008) + index * (Math.PI * 2 / 3)
+      })
+      blade.trickMirage.userData.shardMeshes.forEach((mesh, index) => {
+        const angle = now * 0.004 + index * (Math.PI * 2 / 3)
+        mesh.position.set(Math.cos(angle) * 0.86, 0.08 + Math.sin(now * 0.006 + index) * 0.03, Math.sin(angle) * 0.86)
+        mesh.rotation.y = -angle + Math.PI / 4
+      })
+    } else {
+      setMarkerOpacity(blade.trickMirage, 0)
+    }
+
+    if (blade.trickFlash.visible) {
+      const pulseProgress = 1 - clamp01(blade.trickPulseTimer / TRICK_SPECIAL.pulseDuration)
+      blade.trickFlash.position.set(t.x, getSurfaceYAtXZ(t.x, t.z, 0.04), t.z)
+      blade.trickFlash.scale.setScalar(0.88 + pulseProgress * 1.18)
+      blade.trickFlash.material.opacity = (1 - pulseProgress) * 0.62
+    } else {
+      blade.trickFlash.material.opacity = 0
+    }
   }
 
   function startRingOutVisual(blade) {
@@ -994,6 +1442,89 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     beep({ freq: 220, duration: 0.05, type: 'sawtooth', gain: 0.03, slideTo: 120 })
   }
 
+  function performTrickStep(blade, runtimeState, preferredSign = null) {
+    const pos = blade.rb.translation()
+    const lv = blade.rb.linvel()
+    const target = runtimeState ? pickNearestOpponent(runtimeState, blade) : null
+    const currentSpeed = Math.hypot(lv.x, lv.z)
+    const currentRadius = Math.hypot(pos.x, pos.z)
+    const safeRadius = STADIUM.lipRadius - TRICK_SPECIAL.safeEdgeBuffer
+    const inwardStrength = currentRadius > STADIUM.flatRadius
+      ? clamp01((currentRadius - STADIUM.flatRadius) / Math.max(0.001, safeRadius - STADIUM.flatRadius))
+      : 0
+    const inwardX = currentRadius > 0.001 ? -pos.x / currentRadius : 0
+    const inwardZ = currentRadius > 0.001 ? -pos.z / currentRadius : 0
+
+    let dirX = 0
+    let dirZ = 0
+    if (target) {
+      const tp = target.rb.translation()
+      const dx = tp.x - pos.x
+      const dz = tp.z - pos.z
+      const dist = Math.hypot(dx, dz)
+      if (dist > 0.001 && dist <= TRICK_SPECIAL.maxTargetDist) {
+        dirX = dx / dist
+        dirZ = dz / dist
+      }
+    }
+    if (Math.hypot(dirX, dirZ) < 0.001) {
+      if (currentSpeed > 0.001) {
+        dirX = lv.x / currentSpeed
+        dirZ = lv.z / currentSpeed
+      } else {
+        dirX = Math.cos(blade.launchAngle)
+        dirZ = Math.sin(blade.launchAngle)
+      }
+    }
+
+    const desiredSign = preferredSign || blade.trickStepSign || 1
+    let chosen = null
+    for (const sign of [desiredSign, -desiredSign]) {
+      const sideX = -dirZ * sign
+      const sideZ = dirX * sign
+      const candidateX = pos.x
+        + sideX * TRICK_SPECIAL.stepDistance
+        + dirX * TRICK_SPECIAL.forwardCarryDistance
+        + inwardX * TRICK_SPECIAL.inwardBiasDistance * inwardStrength
+      const candidateZ = pos.z
+        + sideZ * TRICK_SPECIAL.stepDistance
+        + dirZ * TRICK_SPECIAL.forwardCarryDistance
+        + inwardZ * TRICK_SPECIAL.inwardBiasDistance * inwardStrength
+      const candidateRadius = Math.hypot(candidateX, candidateZ)
+      if (candidateRadius <= safeRadius) {
+        chosen = { sign, sideX, sideZ, x: candidateX, z: candidateZ }
+        break
+      }
+    }
+    if (!chosen) return false
+
+    spawnTrickEcho(blade, pos.x, pos.z, 0.92)
+    blade.rb.setTranslation({ x: chosen.x, y: 0.22, z: chosen.z }, true)
+    const carrySpeed = Math.max(currentSpeed * 0.72, TRICK_SPECIAL.stepVelocity)
+    let nextVx = chosen.sideX * carrySpeed + dirX * carrySpeed * TRICK_SPECIAL.forwardCarryVelocity + inwardX * carrySpeed * inwardStrength * 0.22
+    let nextVz = chosen.sideZ * carrySpeed + dirZ * carrySpeed * TRICK_SPECIAL.forwardCarryVelocity + inwardZ * carrySpeed * inwardStrength * 0.22
+    const chosenRadius = Math.hypot(chosen.x, chosen.z)
+    if (chosenRadius > 0.001) {
+      const outwardX = chosen.x / chosenRadius
+      const outwardZ = chosen.z / chosenRadius
+      const outwardSpeed = nextVx * outwardX + nextVz * outwardZ
+      if (outwardSpeed > 0) {
+        nextVx -= outwardX * outwardSpeed * TRICK_SPECIAL.edgeOutwardDamping
+        nextVz -= outwardZ * outwardSpeed * TRICK_SPECIAL.edgeOutwardDamping
+      }
+    }
+    blade.rb.setLinvel({ x: nextVx, y: 0, z: nextVz }, true)
+    blade.trickStepSign = -chosen.sign
+    blade.trickStepCooldown = TRICK_SPECIAL.stepCooldown
+    blade.trickDodgeTimer = TRICK_SPECIAL.dodgeDuration
+    blade.trickCounterTimer = TRICK_SPECIAL.counterDuration
+    blade.trickPulseTimer = TRICK_SPECIAL.pulseDuration
+    blade.ultGlow = Math.max(blade.ultGlow, 0.85)
+    blade.lastImpact = Math.max(blade.lastImpact, 0.62)
+    beep({ freq: 760, duration: 0.03, type: 'square', gain: 0.017, slideTo: 1020 })
+    return true
+  }
+
   function stabilise(blade, dt) {
     if (blade.spin < 3) return
     blade.spin = Math.max(0, blade.spin - 3.2 * dt)
@@ -1023,6 +1554,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     blade.special = 0
     blade.lastImpact = 0.8
     blade.ultGlow = 1
+    if (runtimeState && blade.id === runtimeState.localPlayerId) {
+      commitUltUse(runtimeState.localBuildKey)
+    }
     status.value = `${blade.name} used ${blade.def.specialName}!`
     if (blade.key === 'attack') {
       const target = runtimeState ? pickNearestOpponent(runtimeState, blade) : null
@@ -1067,6 +1601,15 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.vampireDrain = RUBBER_SPECIAL.duration
       blade.rubberDrainPulse = RUBBER_SPECIAL.pulseDuration
       beep({ freq: 320, duration: 0.08, type: 'sawtooth', gain: 0.024, slideTo: 180 })
+    } else if (blade.key === 'trick') {
+      blade.trickPhantomTimer = TRICK_SPECIAL.duration
+      blade.trickStepCooldown = 0
+      blade.trickDodgeTimer = 0
+      blade.trickCounterTimer = 0
+      blade.trickPulseTimer = TRICK_SPECIAL.pulseDuration
+      performTrickStep(blade, runtimeState)
+      status.value = `${blade.name} vanished into a phantom lane!`
+      beep({ freq: 920, duration: 0.05, type: 'triangle', gain: 0.02, slideTo: 540 })
     }
   }
 
@@ -1160,7 +1703,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     }
 
     const stateScale = cpuBlade.aiState === 'recover' ? 1.9 : cpuBlade.aiState === 'approach' ? 1.05 : 0.85
-    const buildScale = cpuBlade.key === 'attack' ? 1.1 : cpuBlade.key === 'stamina' ? 0.9 : 1
+    const buildScale = cpuBlade.key === 'attack' ? 1.1 : cpuBlade.key === 'stamina' ? 0.9 : cpuBlade.key === 'trick' ? 1.04 : 1
     const nudge = 7.6 * cpuBlade.def.stats.grip * stateScale * buildScale
     cpuBlade.rb.setLinvel({ x: lv.x + moveX * nudge * dt, y: 0, z: lv.z + moveZ * nudge * dt }, true)
     if (cpuBlade.aiState === 'approach' && cpuSpeed > 4 && dist < 3.5 && targetEdgeDist < 5.5 && edgeDist > 3 && cpuBlade.boostCooldown <= 0 && cpuBlade.spin > 12 && Math.random() < 0.03) {
@@ -1187,7 +1730,8 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     const lv = blade.rb.linvel()
     const controlScale = blade.attackCommitTimer > 0 ? 0.18 : 1
     const orbitActive = blade.silentOrbit > 0
-    const nudge = 7.6 * blade.def.stats.grip * (orbitActive ? STAMINA_SPECIAL.controlBoost : 1)
+    const phantomActive = blade.trickPhantomTimer > 0
+    const nudge = 7.6 * blade.def.stats.grip * (orbitActive ? STAMINA_SPECIAL.controlBoost : 1) * (phantomActive ? TRICK_SPECIAL.controlBoost : 1)
     let nextX = lv.x + input.moveX * nudge * dt * controlScale
     let nextZ = lv.z + input.moveZ * nudge * dt * controlScale
     if (orbitActive) {
@@ -1224,6 +1768,11 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     blade.vampireDrain = Math.max(0, blade.vampireDrain - dt)
     blade.rubberDrainBurst = Math.max(0, blade.rubberDrainBurst - dt)
     blade.rubberDrainPulse = Math.max(0, blade.rubberDrainPulse - dt)
+    blade.trickPhantomTimer = Math.max(0, blade.trickPhantomTimer - dt)
+    blade.trickStepCooldown = Math.max(0, blade.trickStepCooldown - dt)
+    blade.trickDodgeTimer = Math.max(0, blade.trickDodgeTimer - dt)
+    blade.trickCounterTimer = Math.max(0, blade.trickCounterTimer - dt)
+    blade.trickPulseTimer = Math.max(0, blade.trickPulseTimer - dt)
     blade.defenseReflectFlash = Math.max(0, blade.defenseReflectFlash - dt)
     blade.smashWindow = Math.max(0, blade.smashWindow - dt)
     const hadLock = blade.attackLockTimer > 0
@@ -1234,6 +1783,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     blade.attackSlashTimer = Math.max(0, blade.attackSlashTimer - dt)
     blade.lastImpact = Math.max(0, blade.lastImpact - dt * 2.6)
     blade.ultGlow = Math.max(0, blade.ultGlow - dt * 1.4)
+    for (const echo of blade.trickEchoes.userData.echoes || []) {
+      echo.life = Math.max(0, echo.life - dt)
+    }
 
     if (hadLock && blade.attackLockTimer <= 0 && blade.attackTargetId) {
       startAttackRush(blade, runtimeState)
@@ -1243,6 +1795,16 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.silentOrbitPulse = Math.max(blade.silentOrbitPulse, STAMINA_SPECIAL.pulseDuration)
       blade.ultGlow = Math.max(blade.ultGlow, 0.72)
       beep({ freq: 620, duration: 0.07, type: 'triangle', gain: 0.02, slideTo: 940 })
+    }
+    if (blade.trickPhantomTimer > 0 && blade.trickStepCooldown <= 0) {
+      const target = pickNearestOpponent(runtimeState, blade)
+      const targetPos = target?.rb.translation()
+      const bladePos = blade.rb.translation()
+      const dist = targetPos ? Math.hypot(targetPos.x - bladePos.x, targetPos.z - bladePos.z) : Number.POSITIVE_INFINITY
+      const speed = Math.hypot(blade.rb.linvel().x, blade.rb.linvel().z)
+      if (dist <= TRICK_SPECIAL.maxTargetDist || speed > 4.1) {
+        performTrickStep(blade, runtimeState)
+      }
     }
 
     if (!blade.alive) {
@@ -1309,6 +1871,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     let drain = 1.6 + speed * 0.13 + blade.wobble * 1.2
     drain /= blade.def.stats.stamina
     if (blade.silentOrbit > 0) drain *= STAMINA_SPECIAL.passiveDrainMultiplier
+    if (blade.trickPhantomTimer > 0) drain *= TRICK_SPECIAL.passiveDrainMultiplier
     if (blade.guarding > 0) drain *= DEFENSE_SPECIAL.passiveDrainMultiplier
     blade.spin = Math.max(0, blade.spin - drain * dt)
     blade.special = Math.min(100, blade.special + (0.9 + speed * 0.06) * dt * 10)
@@ -1331,6 +1894,11 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.rubberDrainBurst = 0
       blade.rubberDrainPulse = 0
       blade.rubberDrainTargetId = null
+      blade.trickPhantomTimer = 0
+      blade.trickStepCooldown = 0
+      blade.trickDodgeTimer = 0
+      blade.trickCounterTimer = 0
+      blade.trickPulseTimer = 0
       blade.defenseReflectFlash = 0
       hideBladeEffects(blade)
     }
@@ -1372,6 +1940,22 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       b.ultGlow = Math.max(b.ultGlow, 0.75)
       b.lastImpact = Math.max(b.lastImpact, 0.7)
     }
+    if (a.trickDodgeTimer > 0) {
+      pushA *= TRICK_SPECIAL.dodgePushAbsorb
+    }
+    if (b.trickDodgeTimer > 0) {
+      pushB *= TRICK_SPECIAL.dodgePushAbsorb
+    }
+    if (a.trickCounterTimer > 0) {
+      pushB += TRICK_SPECIAL.counterPushBonus + impact * TRICK_SPECIAL.counterPushImpactScale
+      a.ultGlow = Math.max(a.ultGlow, 0.82)
+      a.lastImpact = Math.max(a.lastImpact, 0.65)
+    }
+    if (b.trickCounterTimer > 0) {
+      pushA += TRICK_SPECIAL.counterPushBonus + impact * TRICK_SPECIAL.counterPushImpactScale
+      b.ultGlow = Math.max(b.ultGlow, 0.82)
+      b.lastImpact = Math.max(b.lastImpact, 0.65)
+    }
     a.rb.setLinvel({ x: lva.x - nx * pushA, y: 0, z: lva.z - nz * pushA }, true)
     b.rb.setLinvel({ x: lvb.x + nx * pushB, y: 0, z: lvb.z + nz * pushB }, true)
 
@@ -1385,6 +1969,10 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       spinLossB *= DEFENSE_SPECIAL.guardedSpinAbsorb
       spinLossA += DEFENSE_SPECIAL.reflectSpinBonus + impact * DEFENSE_SPECIAL.reflectSpinImpactScale
     }
+    if (a.trickDodgeTimer > 0) spinLossA *= TRICK_SPECIAL.dodgeSpinAbsorb
+    if (b.trickDodgeTimer > 0) spinLossB *= TRICK_SPECIAL.dodgeSpinAbsorb
+    if (a.trickCounterTimer > 0) spinLossB += TRICK_SPECIAL.counterSpinBonus + impact * TRICK_SPECIAL.counterSpinImpactScale
+    if (b.trickCounterTimer > 0) spinLossA += TRICK_SPECIAL.counterSpinBonus + impact * TRICK_SPECIAL.counterSpinImpactScale
     if (a.silentOrbit > 0) spinLossA *= STAMINA_SPECIAL.collisionDrainMultiplier
     if (b.silentOrbit > 0) spinLossB *= STAMINA_SPECIAL.collisionDrainMultiplier
     a.spin = Math.max(0, a.spin - spinLossA)
@@ -1430,10 +2018,18 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     status.value = snapshot.status
     countdown.value = snapshot.countdown
     roundResult.value = snapshot.roundResult || null
+    if (roundResult.value?.isMatchOver && roundResult.value.winner) {
+      commitMatchRecord(runtimeState, roundResult.value.winner)
+    }
     runtimeState.scores = { ...snapshot.scores }
+    let localSnapshot = null
     for (const playerSnapshot of snapshot.players || []) {
       const blade = runtimeState.bladesById.get(playerSnapshot.id)
       if (!blade) continue
+      if (playerSnapshot.id === runtimeState.localPlayerId) {
+        localSnapshot = playerSnapshot
+      }
+      const previousSpecial = blade.special
       blade.alive = playerSnapshot.alive
       blade.spin = playerSnapshot.spin
       blade.special = playerSnapshot.special
@@ -1445,6 +2041,15 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.rubberDrainBurst = playerSnapshot.rubberDrainBurst || 0
       blade.rubberDrainTargetId = playerSnapshot.rubberDrainTargetId || null
       blade.rubberDrainPulse = playerSnapshot.rubberDrainPulse || 0
+      const previousTrickPulse = blade.trickPulseTimer
+      const previousTrickDodge = blade.trickDodgeTimer
+      const previousX = blade.rb.translation().x
+      const previousZ = blade.rb.translation().z
+      blade.trickPhantomTimer = playerSnapshot.trickPhantomTimer || 0
+      blade.trickStepCooldown = playerSnapshot.trickStepCooldown || 0
+      blade.trickDodgeTimer = playerSnapshot.trickDodgeTimer || 0
+      blade.trickCounterTimer = playerSnapshot.trickCounterTimer || 0
+      blade.trickPulseTimer = playerSnapshot.trickPulseTimer || 0
       blade.defenseReflectFlash = playerSnapshot.defenseReflectFlash || 0
       blade.smashWindow = playerSnapshot.smashWindow
       blade.attackLockTimer = playerSnapshot.attackLockTimer || 0
@@ -1464,6 +2069,25 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.rb.setLinvel({ x: playerSnapshot.vel.x, y: 0, z: playerSnapshot.vel.z }, true)
       blade.arrow.visible = runtimeState.phase === 'aiming'
       syncMesh(blade)
+      if ((blade.trickPulseTimer > previousTrickPulse + 0.03 || blade.trickDodgeTimer > previousTrickDodge + 0.03) && blade.key === 'trick') {
+        spawnTrickEcho(blade, previousX, previousZ, 0.9)
+      }
+      if (!runtimeState.authoritative && playerSnapshot.id === runtimeState.localPlayerId) {
+        const ultActivated = previousSpecial >= 99 && playerSnapshot.special <= 1 && (
+          playerSnapshot.attackLockTimer > 0 ||
+          playerSnapshot.guarding > 0 ||
+          playerSnapshot.silentOrbit > 0 ||
+          playerSnapshot.vampireDrain > 0 ||
+          playerSnapshot.trickPhantomTimer > 0 ||
+          playerSnapshot.ultGlow > 0.55
+        )
+        if (ultActivated) {
+          commitUltUse(runtimeState.localBuildKey)
+        }
+      }
+    }
+    if (roundResult.value?.winner && runtimeState.lastRecordedRound !== runtimeState.round) {
+      commitRoundStats(runtimeState, roundResult.value.winner, roundResult.value.type, localSnapshot?.deathType)
     }
     updateHud(runtimeState)
   }
@@ -1639,6 +2263,15 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       scene.add(rubberDrainParticles)
       const rubberDrainTrail = createRubberDrainTrail(0x5b168c)
       scene.add(rubberDrainTrail)
+      const trickMirage = createTrickMirage(def.color, def.accent)
+      trickMirage.visible = false
+      scene.add(trickMirage)
+      const trickEchoes = createTrickEchoes(def.color, def.accent)
+      trickEchoes.visible = false
+      scene.add(trickEchoes)
+      const trickFlash = createTrickFlash(def.accent)
+      trickFlash.visible = false
+      scene.add(trickFlash)
       const defenseShieldBurst = new THREE.Mesh(
         new THREE.RingGeometry(0.92, 1.34, 28),
         new THREE.MeshBasicMaterial({
@@ -1716,6 +2349,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         rubberPulse,
         rubberDrainParticles,
         rubberDrainTrail,
+        trickMirage,
+        trickEchoes,
+        trickFlash,
         defenseShieldBurst,
         arrow,
         lockRing,
@@ -1737,6 +2373,13 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         rubberDrainBurst: 0,
         rubberDrainTargetId: null,
         rubberDrainPulse: 0,
+        trickPhantomTimer: 0,
+        trickStepCooldown: 0,
+        trickDodgeTimer: 0,
+        trickCounterTimer: 0,
+        trickPulseTimer: 0,
+        trickStepSign: index % 2 === 0 ? 1 : -1,
+        trickEchoCursor: 0,
         defenseReflectFlash: 0,
         smashWindow: 0,
         attackLockTimer: 0,
@@ -1776,8 +2419,11 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blades,
       bladesById,
       participants: config.participants,
+      localBuildKey: config.participants.find((participant) => participant.id === config.localPlayerId)?.build || selectedBuild.value,
+      matchStatKey: config.type.startsWith('online') ? 'player' : 'cpu',
       scores: Object.fromEntries(config.participants.map((participant) => [participant.id, 0])),
       round: 1,
+      lastRecordedRound: 0,
       phase: 'aiming',
       roundResolved: false,
       matchOver: false,
@@ -1794,6 +2440,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       countdownValues: [3, 2, 1, 0],
       cameraShake: 0,
       cleanupFns: [],
+      recordCommitted: false,
     }
 
     function setBladeArrow(blade) {
@@ -1889,6 +2536,12 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         blade.rubberDrainBurst = 0
         blade.rubberDrainTargetId = null
         blade.rubberDrainPulse = 0
+        blade.trickPhantomTimer = 0
+        blade.trickStepCooldown = 0
+        blade.trickDodgeTimer = 0
+        blade.trickCounterTimer = 0
+        blade.trickPulseTimer = 0
+        blade.trickStepSign = blade.trickStepSign || 1
         blade.defenseReflectFlash = 0
         blade.smashWindow = 0
         blade.attackLockTimer = 0
@@ -1961,8 +2614,13 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         isMatchOver: runtimeState.scores[winnerBlade.id] >= runtimeState.scoreToWin,
       }
       status.value = `${winnerBlade.name} takes round ${runtimeState.round}.`
+      const localBlade = runtimeState.bladesById.get(runtimeState.localPlayerId)
+      commitRoundStats(runtimeState, winnerBlade.id, winType, localBlade?.deathType)
       updateHud(runtimeState)
       runtimeState.matchOver = runtimeState.scores[winnerBlade.id] >= runtimeState.scoreToWin
+      if (runtimeState.matchOver) {
+        commitMatchRecord(runtimeState, winnerBlade.id)
+      }
       runtimeState.roundResetTimer = runtimeState.matchOver ? 3 : 2.2
     }
 
@@ -2042,7 +2700,10 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
           if (runtimeState.roundResetTimer <= 0) {
             if (runtimeState.matchOver) {
               if (runtimeState.networked && roomApi) {
-                roomApi.sendMatchComplete(roundResult.value?.outcome || 'Match finished.')
+                roomApi.sendMatchComplete(
+                  roundResult.value?.outcome || 'Match finished.',
+                  buildOnlineMatchSummary(runtimeState)
+                )
               }
               gamePhase.value = 'menu'
               if (runtime === runtimeState) disposeRuntime()
@@ -2119,8 +2780,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
   }
 
   watch(selectedBuild, (build) => {
+    storeSelectedBuild(build)
     if (roomApi?.room?.value) {
-      roomApi.updateProfile({ name: roomApi.playerName.value, build })
+      roomApi.updateProfile({ name: roomApi.playerName.value, build, record: playerRecord.value })
     }
   })
 
@@ -2143,6 +2805,8 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
   return {
     selectedBuild,
+    playerRecord,
+    playerStats,
     menuMode,
     gamePhase,
     status,
