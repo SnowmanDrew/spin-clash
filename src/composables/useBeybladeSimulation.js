@@ -854,6 +854,19 @@ function getLaunchOpeningWobble(score, grade, blade) {
   return baseWobble
 }
 
+function getLaunchPowerValue(blade, charge, launchScore, forced = false) {
+  return (2.5 + clamp01(charge) * 3 * blade.def.stats.speed)
+    * (blade.def.physics.launchPowerScale || 1)
+    * getLaunchOpeningPowerScale(clamp01(launchScore), forced)
+}
+
+function getLaunchPowerPercent(blade, charge, launchScore, forced = false) {
+  const currentPower = getLaunchPowerValue(blade, charge, launchScore, forced)
+  const maxPower = getLaunchPowerValue(blade, 1, 1, false)
+  if (maxPower <= 0) return 0
+  return Math.round(clamp01(currentPower / maxPower) * 100)
+}
+
 function getOpeningClashPushScale(attacker, defender, runtimeState) {
   const elapsed = runtimeState?.fightElapsed || 0
   if (elapsed >= OPENING_CLASH.duration) return 1
@@ -1417,6 +1430,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     const projectedScreenY = ((1 - tmpScreenPos.y) * 0.5) * 100
     const stableScreenX = screenVisible ? projectedScreenX : (badgeEntry?.stableScreenX ?? projectedScreenX)
     const stableScreenY = screenVisible ? projectedScreenY : (badgeEntry?.stableScreenY ?? projectedScreenY)
+    const badgeScore = blade.launchLocked ? blade.launchTimingScore : blade.charge
     const nextBadge = {
       id: blade.id,
       name: blade.name,
@@ -1426,7 +1440,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       isLocal: blade.id === runtimeState.localPlayerId,
       isCpu: blade.kind === 'cpu',
       grade: blade.launchGrade,
-      powerPercent: Math.round(clamp01(badgeCharge) * 100),
+      powerPercent: getLaunchPowerPercent(blade, badgeCharge, badgeScore, blade.forcedLaunch),
       spinDir: blade.launchLocked ? blade.lockedSpinDir : blade.spinDir,
       screenX: projectedScreenX,
       screenY: projectedScreenY,
@@ -3210,7 +3224,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       const badgeEntry = launchBadges.value.find((entry) => entry.id === blade.id)
       if (badgeEntry) {
         badgeEntry.grade = blade.launchGrade
-        badgeEntry.powerPercent = Math.round(clamp01(arrowCharge) * 100)
+        badgeEntry.powerPercent = getLaunchPowerPercent(blade, arrowCharge, arrowScore, blade.forcedLaunch)
         badgeEntry.spinDir = blade.launchLocked ? blade.lockedSpinDir : blade.spinDir
         badgeEntry.color = blade.def.color
         badgeEntry.accent = blade.def.accent
