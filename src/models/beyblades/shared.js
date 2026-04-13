@@ -130,11 +130,16 @@ export function addBitChip(ctx, options = {}) {
 
 export function finishBlade(ctx) {
   const aura = new THREE.Mesh(
-    new THREE.TorusGeometry(1.10, 0.03, 8, 52),
-    new THREE.MeshBasicMaterial({ color: ctx.accent, transparent: true, opacity: 0.0 })
+    new THREE.CylinderGeometry(0.18, 0.26, 0.16, 18),
+    new THREE.MeshBasicMaterial({
+      color: ctx.accent,
+      transparent: true,
+      opacity: 0.0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
   )
-  aura.rotation.x = Math.PI / 2
-  aura.position.y = 0.26
+  aura.position.y = 0.70
   ctx.group.add(aura)
   return { group: ctx.group, aura }
 }

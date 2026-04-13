@@ -22,6 +22,74 @@ const STADIUM = {
   ringOutGravity: 10.2,
 }
 
+const AIM_COUNTDOWN_DURATION = 3.5
+
+const ATTACK_SPECIAL = {
+  lockDuration: 0.42,
+  rushDuration: 0.34,
+  commitDuration: 0.56,
+  snapDuration: 0.12,
+  slashDuration: 0.16,
+  smashWindow: 1.18,
+  smashMultiplier: 1.3,
+  rushPowerScale: 1.85,
+  fallbackPowerScale: 1.6,
+  guidedSpeedFloor: 9.1,
+  guidedBlend: 0.7,
+}
+
+const DEFENSE_SPECIAL = {
+  guardDuration: 1.95,
+  wobbleScale: 0.3,
+  passiveDrainMultiplier: 0.76,
+  defenseMultiplier: 1.62,
+  reflectPushBonus: 1.05,
+  reflectPushImpactScale: 0.56,
+  reflectSpinBonus: 0.62,
+  reflectSpinImpactScale: 0.18,
+  guardedPushAbsorb: 0.82,
+  guardedSpinAbsorb: 0.72,
+  reflectFlashDuration: 0.2,
+}
+
+const STAMINA_SPECIAL = {
+  duration: 2.8,
+  wobbleScale: 0.28,
+  passiveDrainMultiplier: 0.4,
+  collisionDrainMultiplier: 0.52,
+  controlBoost: 1.18,
+  lateralDamping: 7.8,
+  idleDriftDamping: 0.95,
+  recenterStartRadius: 4.9,
+  recenterForce: 4.2,
+  outwardBrake: 2.2,
+  activationVelocityCleanse: 0.9,
+  activationRefundThreshold: 20,
+  activationRefund: 4.4,
+  completionRefund: 3.6,
+  pulseDuration: 0.28,
+}
+
+const RUBBER_SPECIAL = {
+  duration: 2.2,
+  burstDuration: 0.52,
+  pulseDuration: 0.18,
+}
+
+const CPU_LAUNCH = {
+  baseCharge: 0.72,
+  chargeVariance: 0.12,
+  angleVariance: 0.18,
+  buildProfiles: {
+    attack: { baseCharge: 0.79, chargeVariance: 0.08, angleVariance: 0.1 },
+    defense: { baseCharge: 0.68, chargeVariance: 0.09, angleVariance: 0.13 },
+    stamina: { baseCharge: 0.7, chargeVariance: 0.08, angleVariance: 0.16 },
+    rubber: { baseCharge: 0.74, chargeVariance: 0.1, angleVariance: 0.2 },
+  },
+}
+
+const ATTACK_UI_RENDER_ORDER = 120
+
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const tmpSurfaceNormal = new THREE.Vector3()
 const tmpSpinAxis = new THREE.Vector3()
@@ -44,6 +112,370 @@ function smooth01(t) {
 
 function mix(a, b, t) {
   return a + (b - a) * t
+}
+
+function createCornerMarker(size, cornerLength, thickness, color) {
+  const half = size * 0.5
+  const marker = new THREE.Group()
+  marker.rotation.x = -Math.PI / 2
+  const material = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    depthTest: false,
+  })
+  const materials = []
+
+  const segments = [
+    { x: -half + cornerLength * 0.5, z: -half, width: cornerLength, height: thickness },
+    { x: -half, z: -half + cornerLength * 0.5, width: thickness, height: cornerLength },
+    { x: half - cornerLength * 0.5, z: -half, width: cornerLength, height: thickness },
+    { x: half, z: -half + cornerLength * 0.5, width: thickness, height: cornerLength },
+    { x: -half + cornerLength * 0.5, z: half, width: cornerLength, height: thickness },
+    { x: -half, z: half - cornerLength * 0.5, width: thickness, height: cornerLength },
+    { x: half - cornerLength * 0.5, z: half, width: cornerLength, height: thickness },
+    { x: half, z: half - cornerLength * 0.5, width: thickness, height: cornerLength },
+  ]
+
+  for (const segment of segments) {
+    const piece = new THREE.Mesh(new THREE.PlaneGeometry(segment.width, segment.height), material.clone())
+    piece.position.set(segment.x, 0, segment.z)
+    piece.renderOrder = ATTACK_UI_RENDER_ORDER
+    marker.add(piece)
+    materials.push(piece.material)
+  }
+
+  marker.userData.materials = materials
+  marker.renderOrder = ATTACK_UI_RENDER_ORDER
+  return marker
+}
+
+function createAttackSlash(color) {
+  const slash = new THREE.Group()
+  slash.rotation.x = -Math.PI / 2
+  slash.renderOrder = ATTACK_UI_RENDER_ORDER
+  const materials = []
+  const pieces = [
+    { width: 2.5, height: 0.24, angle: Math.PI / 4 },
+    { width: 1.95, height: 0.16, angle: Math.PI / 4, x: 0.22, z: -0.18 },
+    { width: 2.15, height: 0.18, angle: -Math.PI / 4, x: -0.18, z: 0.16 },
+  ]
+
+  for (const pieceDef of pieces) {
+    const piece = new THREE.Mesh(
+      new THREE.PlaneGeometry(pieceDef.width, pieceDef.height),
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        depthTest: false,
+      })
+    )
+    piece.position.set(pieceDef.x || 0, 0, pieceDef.z || 0)
+    piece.rotation.z = pieceDef.angle
+    piece.renderOrder = ATTACK_UI_RENDER_ORDER
+    slash.add(piece)
+    materials.push(piece.material)
+  }
+
+  slash.userData.materials = materials
+  return slash
+}
+
+function createDefenseShield(color, accent) {
+  const shield = new THREE.Group()
+  const materials = []
+
+  const shell = new THREE.Mesh(
+    new THREE.OctahedronGeometry(1.02, 1),
+    new THREE.MeshBasicMaterial({
+      color: accent,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  shield.add(shell)
+  materials.push(shell.material)
+
+  const ringA = new THREE.Mesh(
+    new THREE.TorusGeometry(1.04, 0.085, 10, 36),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  ringA.rotation.x = Math.PI / 2
+  shield.add(ringA)
+  materials.push(ringA.material)
+
+  const ringB = new THREE.Mesh(
+    new THREE.TorusGeometry(0.92, 0.055, 10, 28),
+    new THREE.MeshBasicMaterial({
+      color: accent,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  ringB.rotation.z = Math.PI / 2
+  shield.add(ringB)
+  materials.push(ringB.material)
+
+  shield.userData.materials = materials
+  return shield
+}
+
+function createStaminaOrbit(color, accent) {
+  const orbit = new THREE.Group()
+  const primary = new THREE.Mesh(
+    new THREE.TorusGeometry(0.92, 0.05, 10, 40),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  primary.rotation.x = Math.PI / 2
+  orbit.add(primary)
+
+  const secondary = new THREE.Mesh(
+    new THREE.TorusGeometry(1.12, 0.03, 8, 36),
+    new THREE.MeshBasicMaterial({
+      color: accent,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  secondary.rotation.x = Math.PI / 3
+  secondary.rotation.z = Math.PI / 5
+  orbit.add(secondary)
+
+  orbit.userData.primaryMaterial = primary.material
+  orbit.userData.secondaryMaterial = secondary.material
+  orbit.userData.secondaryMesh = secondary
+  return orbit
+}
+
+function createRubberAura(color, accent) {
+  const aura = new THREE.Group()
+  const rimGlow = new THREE.Mesh(
+    new THREE.TorusGeometry(0.84, 0.07, 10, 42),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  rimGlow.rotation.x = Math.PI / 2
+  rimGlow.position.y = 0.02
+  aura.add(rimGlow)
+
+  const hotEdge = new THREE.Mesh(
+    new THREE.TorusGeometry(0.9, 0.026, 8, 36),
+    new THREE.MeshBasicMaterial({
+      color: 0xd18bff,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  hotEdge.rotation.x = Math.PI / 2
+  hotEdge.rotation.z = Math.PI / 5
+  hotEdge.position.y = 0.04
+  aura.add(hotEdge)
+
+  const edgeSlashA = new THREE.Mesh(
+    new THREE.TorusGeometry(0.78, 0.03, 8, 20, Math.PI * 0.46),
+    new THREE.MeshBasicMaterial({
+      color: accent,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  edgeSlashA.rotation.x = Math.PI / 2
+  edgeSlashA.rotation.z = Math.PI / 3
+  edgeSlashA.position.y = 0.06
+  aura.add(edgeSlashA)
+
+  const edgeSlashB = new THREE.Mesh(
+    new THREE.TorusGeometry(0.78, 0.03, 8, 20, Math.PI * 0.36),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  edgeSlashB.rotation.x = Math.PI / 2
+  edgeSlashB.rotation.z = -Math.PI / 4
+  edgeSlashB.rotation.y = Math.PI * 0.72
+  edgeSlashB.position.y = -0.01
+  aura.add(edgeSlashB)
+
+  aura.userData.outerMaterial = rimGlow.material
+  aura.userData.shellMaterial = hotEdge.material
+  aura.userData.shellMesh = hotEdge
+  aura.userData.innerMaterial = edgeSlashA.material
+  aura.userData.innerMesh = edgeSlashA
+  aura.userData.accentMaterial = edgeSlashB.material
+  aura.userData.accentMesh = edgeSlashB
+  return aura
+}
+
+function createRubberDrainParticles(color, accent) {
+  const particles = new THREE.Group()
+  const materials = []
+  const pieces = []
+  for (let index = 0; index < 24; index += 1) {
+    const size = 0.035 + (index % 4) * 0.012
+    const piece = new THREE.Mesh(
+      new THREE.SphereGeometry(size, 8, 8),
+      new THREE.MeshBasicMaterial({
+        color: index % 2 === 0 ? accent : color,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    )
+    piece.visible = false
+    piece.userData.delay = (index % 12) * 0.04 + Math.floor(index / 12) * 0.025
+    piece.userData.lane = ((index % 6) - 2.5) * 0.085
+    piece.userData.lift = 0.03 + (index % 5) * 0.022
+    piece.userData.phase = index * 0.7
+    piece.userData.angle = (index / 24) * Math.PI * 2 + (index % 3) * 0.18
+    piece.userData.burstRadius = 0.48 + (index % 4) * 0.12
+    piece.userData.arcLift = 0.42 + (index % 5) * 0.08
+    particles.add(piece)
+    pieces.push(piece)
+    materials.push(piece.material)
+  }
+  particles.userData.pieces = pieces
+  particles.userData.materials = materials
+  return particles
+}
+
+function createRubberDrainTrail(color) {
+  const geometry = new THREE.BufferGeometry().setFromPoints(Array.from({ length: 7 }, () => new THREE.Vector3()))
+  const line = new THREE.Line(
+    geometry,
+    new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: false,
+    })
+  )
+  line.renderOrder = ATTACK_UI_RENDER_ORDER
+  line.visible = false
+  return line
+}
+
+function setMarkerOpacity(marker, opacity) {
+  for (const material of marker.userData.materials || []) {
+    material.opacity = opacity
+  }
+}
+
+function hideBladeEffects(blade) {
+  if (blade.lockRing) {
+    blade.lockRing.visible = false
+    setMarkerOpacity(blade.lockRing, 0)
+  }
+  if (blade.lockRingOuter) {
+    blade.lockRingOuter.visible = false
+    setMarkerOpacity(blade.lockRingOuter, 0)
+  }
+  if (blade.lockSlash) {
+    blade.lockSlash.visible = false
+    setMarkerOpacity(blade.lockSlash, 0)
+  }
+  if (blade.lockFlash) {
+    blade.lockFlash.visible = false
+    blade.lockFlash.material.opacity = 0
+  }
+  if (blade.lockBeam) {
+    blade.lockBeam.visible = false
+    blade.lockBeam.material.opacity = 0
+  }
+  if (blade.defenseShield) {
+    blade.defenseShield.visible = false
+    setMarkerOpacity(blade.defenseShield, 0)
+  }
+  if (blade.defenseShieldBurst) {
+    blade.defenseShieldBurst.visible = false
+    blade.defenseShieldBurst.material.opacity = 0
+  }
+  if (blade.staminaOrbit) {
+    blade.staminaOrbit.visible = false
+    blade.staminaOrbit.userData.primaryMaterial.opacity = 0
+    blade.staminaOrbit.userData.secondaryMaterial.opacity = 0
+  }
+  if (blade.staminaFloorRing) {
+    blade.staminaFloorRing.visible = false
+    blade.staminaFloorRing.material.opacity = 0
+  }
+  if (blade.staminaPulse) {
+    blade.staminaPulse.visible = false
+    blade.staminaPulse.material.opacity = 0
+  }
+  if (blade.rubberAura) {
+    blade.rubberAura.visible = false
+    blade.rubberAura.userData.outerMaterial.opacity = 0
+    blade.rubberAura.userData.shellMaterial.opacity = 0
+    blade.rubberAura.userData.innerMaterial.opacity = 0
+    blade.rubberAura.userData.accentMaterial.opacity = 0
+  }
+  if (blade.rubberFloorRing) {
+    blade.rubberFloorRing.visible = false
+    blade.rubberFloorRing.material.opacity = 0
+  }
+  if (blade.rubberPulse) {
+    blade.rubberPulse.visible = false
+    blade.rubberPulse.material.opacity = 0
+  }
+  if (blade.rubberDrainParticles) {
+    blade.rubberDrainParticles.visible = false
+    setMarkerOpacity(blade.rubberDrainParticles, 0)
+    for (const piece of blade.rubberDrainParticles.userData.pieces || []) piece.visible = false
+  }
+  if (blade.rubberDrainTrail) {
+    blade.rubberDrainTrail.visible = false
+    blade.rubberDrainTrail.material.opacity = 0
+  }
 }
 
 function getStadiumHeight(r) {
@@ -105,6 +537,16 @@ function serialiseInput(input) {
     stabilise: Boolean(input.stabilise),
     special: Boolean(input.special),
   }
+}
+
+function getBladeTarget(runtimeState, blade) {
+  return blade.attackTargetId ? runtimeState.bladesById.get(blade.attackTargetId) || null : null
+}
+
+function rollCpuLaunchProfile(blade) {
+  const profile = CPU_LAUNCH.buildProfiles[blade.key] || CPU_LAUNCH
+  blade.cpuLaunchCharge = clamp01(profile.baseCharge + (Math.random() * 2 - 1) * profile.chargeVariance)
+  blade.cpuLaunchAngle = blade.spawn.angle + (Math.random() * 2 - 1) * profile.angleVariance
 }
 
 export function useBeybladeSimulation(mountRef, roomApi = null) {
@@ -210,8 +652,19 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
           wobble: blade.wobble,
           guarding: blade.guarding,
           silentOrbit: blade.silentOrbit,
+          silentOrbitPulse: blade.silentOrbitPulse,
           vampireDrain: blade.vampireDrain,
+          rubberDrainBurst: blade.rubberDrainBurst,
+          rubberDrainTargetId: blade.rubberDrainTargetId,
+          rubberDrainPulse: blade.rubberDrainPulse,
+          defenseReflectFlash: blade.defenseReflectFlash,
           smashWindow: blade.smashWindow,
+          attackLockTimer: blade.attackLockTimer,
+          attackRushTimer: blade.attackRushTimer,
+          attackCommitTimer: blade.attackCommitTimer,
+          attackTargetId: blade.attackTargetId,
+          attackSnapTimer: blade.attackSnapTimer,
+          attackSlashTimer: blade.attackSlashTimer,
           ultGlow: blade.ultGlow,
           visualSpin: blade.visualSpin,
           deathType: blade.deathType,
@@ -272,10 +725,185 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     blade.mesh.quaternion.multiply(tmpSpinQuat)
     blade.mesh.quaternion.multiply(tmpWobbleQuatA)
     blade.mesh.quaternion.multiply(tmpWobbleQuatB)
-    blade.aura.material.opacity = Math.min(1, blade.special / 100 * 0.5 + blade.ultGlow * 0.55)
-    blade.aura.scale.setScalar(1 + blade.special / 320 + blade.lastImpact * 0.08 + blade.ultGlow * 2.8)
+    const specialReady = blade.special >= 100
+    const corePulse = 1 + Math.sin(now * 0.02 + t.x * 0.6 + t.z * 0.6) * 0.08
+    const coreGlow = Math.max(specialReady ? 0.85 : 0, blade.ultGlow * 0.75)
+    blade.aura.material.opacity = coreGlow
+    blade.aura.scale.setScalar((specialReady ? 1.12 : 0.9) * corePulse + blade.ultGlow * 0.22)
     blade.bladeLight.position.set(t.x, surfaceY + 0.38, t.z)
     blade.bladeLight.intensity = blade.ultGlow * 24 + blade.lastImpact * 5
+
+    const orbitActive = blade.key === 'stamina' && blade.alive && (blade.silentOrbit > 0 || blade.silentOrbitPulse > 0)
+    blade.staminaOrbit.visible = orbitActive
+    blade.staminaFloorRing.visible = orbitActive
+    blade.staminaPulse.visible = orbitActive && blade.silentOrbitPulse > 0
+    if (orbitActive) {
+      const orbitRatio = clamp01(blade.silentOrbit / STAMINA_SPECIAL.duration)
+      const pulseProgress = blade.silentOrbitPulse > 0
+        ? 1 - clamp01(blade.silentOrbitPulse / STAMINA_SPECIAL.pulseDuration)
+        : 1
+      const flow = 1 + Math.sin(now * 0.018 + t.x * 0.35 + t.z * 0.35) * 0.05
+      blade.staminaOrbit.position.set(t.x, surfaceY + STADIUM.bladeLift, t.z)
+      blade.staminaOrbit.quaternion.copy(blade.mesh.quaternion)
+      blade.staminaOrbit.scale.setScalar((0.98 + orbitRatio * 0.12 + (1 - pulseProgress) * 0.08) * flow)
+      blade.staminaOrbit.userData.primaryMaterial.opacity = 0.18 + orbitRatio * 0.22
+      blade.staminaOrbit.userData.secondaryMaterial.opacity = 0.12 + orbitRatio * 0.16
+      blade.staminaOrbit.userData.secondaryMesh.rotation.y = now * 0.0032
+
+      blade.staminaFloorRing.position.set(t.x, getSurfaceYAtXZ(t.x, t.z, 0.03), t.z)
+      blade.staminaFloorRing.scale.setScalar(1.02 + orbitRatio * 0.18)
+      blade.staminaFloorRing.material.opacity = 0.16 + orbitRatio * 0.22
+
+      if (blade.staminaPulse.visible) {
+        blade.staminaPulse.position.set(t.x, getSurfaceYAtXZ(t.x, t.z, 0.045), t.z)
+        blade.staminaPulse.scale.setScalar(0.82 + pulseProgress * 1.18)
+        blade.staminaPulse.material.opacity = (1 - pulseProgress) * 0.8
+      } else {
+        blade.staminaPulse.material.opacity = 0
+      }
+    } else {
+      blade.staminaOrbit.userData.primaryMaterial.opacity = 0
+      blade.staminaOrbit.userData.secondaryMaterial.opacity = 0
+      blade.staminaFloorRing.material.opacity = 0
+      blade.staminaPulse.material.opacity = 0
+    }
+
+    const rubberActive = blade.key === 'rubber' && blade.alive && (blade.vampireDrain > 0 || blade.rubberDrainPulse > 0)
+    blade.rubberAura.visible = rubberActive
+    blade.rubberFloorRing.visible = rubberActive
+    blade.rubberPulse.visible = rubberActive && blade.rubberDrainPulse > 0
+    if (rubberActive) {
+      const drainRatio = clamp01(blade.vampireDrain / RUBBER_SPECIAL.duration)
+      const pulseProgress = blade.rubberDrainPulse > 0
+        ? 1 - clamp01(blade.rubberDrainPulse / RUBBER_SPECIAL.pulseDuration)
+        : 1
+      blade.rubberAura.position.set(t.x, surfaceY + STADIUM.bladeLift, t.z)
+      blade.rubberAura.quaternion.copy(blade.mesh.quaternion)
+      blade.rubberAura.scale.setScalar(1.01 + drainRatio * 0.1 + (1 - pulseProgress) * 0.08)
+      blade.rubberAura.userData.outerMaterial.opacity = 0.24 + drainRatio * 0.24
+      blade.rubberAura.userData.shellMaterial.opacity = 0.18 + drainRatio * 0.2
+      blade.rubberAura.userData.innerMaterial.opacity = 0.22 + drainRatio * 0.22
+      blade.rubberAura.userData.accentMaterial.opacity = 0.16 + drainRatio * 0.18
+      blade.rubberAura.userData.shellMesh.rotation.y = now * 0.0028
+      blade.rubberAura.userData.innerMesh.rotation.y = now * -0.0042
+      blade.rubberAura.userData.accentMesh.rotation.y = now * 0.0053
+
+      blade.rubberFloorRing.position.set(t.x, surfaceY + STADIUM.bladeLift, t.z)
+      blade.rubberFloorRing.quaternion.copy(blade.mesh.quaternion)
+      blade.rubberFloorRing.scale.setScalar(1 + drainRatio * 0.1)
+      blade.rubberFloorRing.material.opacity = 0.16 + drainRatio * 0.18
+
+      if (blade.rubberPulse.visible) {
+        blade.rubberPulse.position.set(t.x, surfaceY + STADIUM.bladeLift, t.z)
+        blade.rubberPulse.quaternion.copy(blade.mesh.quaternion)
+        blade.rubberPulse.scale.setScalar(0.9 + pulseProgress * 0.36)
+        blade.rubberPulse.material.opacity = (1 - pulseProgress) * 0.68
+      } else {
+        blade.rubberPulse.material.opacity = 0
+      }
+    } else {
+      blade.rubberAura.userData.outerMaterial.opacity = 0
+      blade.rubberAura.userData.shellMaterial.opacity = 0
+      blade.rubberAura.userData.innerMaterial.opacity = 0
+      blade.rubberAura.userData.accentMaterial.opacity = 0
+      blade.rubberFloorRing.material.opacity = 0
+      blade.rubberPulse.material.opacity = 0
+    }
+
+    const drainTarget = blade.rubberDrainTargetId && runtime?.bladesById?.get(blade.rubberDrainTargetId)
+    const drainBurstActive = blade.key === 'rubber' && blade.alive && blade.rubberDrainBurst > 0 && drainTarget?.alive
+    blade.rubberDrainParticles.visible = drainBurstActive
+    blade.rubberDrainTrail.visible = drainBurstActive
+    if (drainBurstActive) {
+      const targetPos = drainTarget.rb.translation()
+      const sourcePos = blade.rb.translation()
+      const startY = getSurfaceYAtXZ(targetPos.x, targetPos.z, 0.26)
+      const endY = getSurfaceYAtXZ(sourcePos.x, sourcePos.z, 0.24)
+      const burstProgress = 1 - clamp01(blade.rubberDrainBurst / RUBBER_SPECIAL.burstDuration)
+      const pieces = blade.rubberDrainParticles.userData.pieces || []
+      const materials = blade.rubberDrainParticles.userData.materials || []
+      const dx = sourcePos.x - targetPos.x
+      const dz = sourcePos.z - targetPos.z
+      const dist = Math.hypot(dx, dz) || 1
+      const sideX = -dz / dist
+      const sideZ = dx / dist
+      const trailControlX = targetPos.x + dx * 0.24 + sideX * 0.95
+      const trailControlY = mix(startY, endY, 0.38) + 1.1
+      const trailControlZ = targetPos.z + dz * 0.24 + sideZ * 0.95
+      const trailPoints = []
+      for (let step = 0; step <= 6; step += 1) {
+        const u = step / 6
+        const invU = 1 - u
+        trailPoints.push(new THREE.Vector3(
+          invU * invU * targetPos.x + 2 * invU * u * trailControlX + u * u * sourcePos.x,
+          invU * invU * startY + 2 * invU * u * trailControlY + u * u * endY,
+          invU * invU * targetPos.z + 2 * invU * u * trailControlZ + u * u * sourcePos.z,
+        ))
+      }
+      blade.rubberDrainTrail.geometry.setFromPoints(trailPoints)
+      blade.rubberDrainTrail.material.opacity = clamp01(0.3 + (1 - burstProgress) * 0.22)
+      pieces.forEach((piece, index) => {
+        const delay = piece.userData.delay || 0
+        const travel = clamp01((burstProgress - delay) / Math.max(0.12, 1 - delay))
+        const arriveFade = clamp01((1 - travel) / 0.22)
+        const spawnFade = clamp01((burstProgress - delay) / 0.08)
+        const visible = burstProgress > delay && arriveFade > 0.001
+        piece.visible = visible
+        if (!visible) {
+          materials[index].opacity = 0
+          return
+        }
+        const lane = piece.userData.lane || 0
+        const lift = piece.userData.lift || 0
+        const phase = piece.userData.phase || 0
+        const angle = piece.userData.angle || 0
+        const burstRadius = piece.userData.burstRadius || 0.4
+        const arcLift = piece.userData.arcLift || 0.4
+        const burstDirX = Math.cos(angle)
+        const burstDirZ = Math.sin(angle)
+        const curveT = Math.pow(travel, 0.78)
+        const invT = 1 - curveT
+        const controlX = targetPos.x + burstDirX * burstRadius + sideX * lane * 0.55 + dx * 0.18
+        const controlY = startY + arcLift + lift
+        const controlZ = targetPos.z + burstDirZ * burstRadius + sideZ * lane * 0.55 + dz * 0.18
+        const arcX = invT * invT * targetPos.x + 2 * invT * curveT * controlX + curveT * curveT * sourcePos.x
+        const arcY = invT * invT * startY + 2 * invT * curveT * controlY + curveT * curveT * endY
+        const arcZ = invT * invT * targetPos.z + 2 * invT * curveT * controlZ + curveT * curveT * sourcePos.z
+        const swirl = Math.sin(now * 0.024 + phase) * 0.05 * invT
+        piece.position.set(
+          arcX + sideX * swirl,
+          arcY + Math.sin(now * 0.03 + phase) * 0.028,
+          arcZ - sideZ * swirl
+        )
+        piece.scale.setScalar(0.62 + invT * 0.95)
+        materials[index].opacity = spawnFade * arriveFade * (0.78 + invT * 0.2)
+      })
+    } else {
+      setMarkerOpacity(blade.rubberDrainParticles, 0)
+      for (const piece of blade.rubberDrainParticles.userData.pieces || []) piece.visible = false
+      blade.rubberDrainTrail.material.opacity = 0
+    }
+
+    const guardActive = blade.key === 'defense' && blade.alive && (blade.guarding > 0 || blade.defenseReflectFlash > 0)
+    blade.defenseShield.visible = guardActive
+    blade.defenseShieldBurst.visible = guardActive && blade.defenseReflectFlash > 0
+    if (guardActive) {
+      const time = performance.now()
+      const guardRatio = clamp01(blade.guarding / DEFENSE_SPECIAL.guardDuration)
+      const reflectRatio = clamp01(blade.defenseReflectFlash / DEFENSE_SPECIAL.reflectFlashDuration)
+      const guardPulse = 1 + Math.sin(time * 0.024 + t.x * 0.8 + t.z * 0.8) * 0.045
+      blade.defenseShield.position.set(t.x, surfaceY + STADIUM.bladeLift, t.z)
+      blade.defenseShield.scale.setScalar((1.02 + guardRatio * 0.06 + reflectRatio * 0.16) * guardPulse)
+      blade.defenseShield.quaternion.copy(blade.mesh.quaternion)
+      setMarkerOpacity(blade.defenseShield, 0.16 + guardRatio * 0.12 + reflectRatio * 0.28)
+
+      blade.defenseShieldBurst.position.set(t.x, getSurfaceYAtXZ(t.x, t.z, 0.08), t.z)
+      blade.defenseShieldBurst.scale.setScalar(0.88 + (1 - reflectRatio) * 0.82)
+      blade.defenseShieldBurst.material.opacity = reflectRatio * 0.85
+    } else {
+      setMarkerOpacity(blade.defenseShield, 0)
+      blade.defenseShieldBurst.material.opacity = 0
+    }
   }
 
   function startRingOutVisual(blade) {
@@ -304,6 +932,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
   function updateRingOutVisual(blade, dt) {
     if (!blade.ringOutVisual) return
+    hideBladeEffects(blade)
     const fx = blade.ringOutVisual
     fx.x += fx.vx * dt
     fx.y += fx.vy * dt
@@ -326,16 +955,43 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     blade.mesh.quaternion.multiply(tmpTumbleQuat)
   }
 
-  function burst(blade, powerScale = 1) {
+  function burst(blade, powerScale = 1, aimDirection = null) {
     if (blade.boostCooldown > 0 || blade.spin < 7) return
     const lv = blade.rb.linvel()
-    const mag = Math.hypot(lv.x, lv.z) || 1
     const boost = 4.5 * blade.def.stats.speed * powerScale
-    blade.rb.setLinvel({ x: lv.x + (lv.x / mag) * boost, y: 0, z: lv.z + (lv.z / mag) * boost }, true)
+    if (aimDirection) {
+      const currentSpeed = Math.hypot(lv.x, lv.z)
+      const carrySpeed = Math.max(boost * 0.55, currentSpeed * 0.35)
+      blade.rb.setLinvel({
+        x: aimDirection.x * (carrySpeed + boost),
+        y: 0,
+        z: aimDirection.z * (carrySpeed + boost),
+      }, true)
+    } else {
+      const mag = Math.hypot(lv.x, lv.z) || 1
+      blade.rb.setLinvel({ x: lv.x + (lv.x / mag) * boost, y: 0, z: lv.z + (lv.z / mag) * boost }, true)
+    }
     blade.spin = Math.max(0, blade.spin - 2.6)
     blade.boostCooldown = 0.6
     blade.lastImpact = 0.4
     beep({ freq: 480, duration: 0.05, type: 'square', gain: 0.018, slideTo: 260 })
+  }
+
+  function startAttackRush(blade, runtimeState, powerScale = ATTACK_SPECIAL.rushPowerScale) {
+    const target = getBladeTarget(runtimeState, blade)
+    const bladePos = blade.rb.translation()
+    const targetPos = target?.rb.translation()
+    const dx = targetPos ? targetPos.x - bladePos.x : 0
+    const dz = targetPos ? targetPos.z - bladePos.z : 0
+    const mag = Math.hypot(dx, dz)
+    const aimDirection = mag > 0.001 ? { x: dx / mag, z: dz / mag } : null
+    blade.smashWindow = Math.max(blade.smashWindow, ATTACK_SPECIAL.smashWindow)
+    blade.attackRushTimer = ATTACK_SPECIAL.rushDuration
+    blade.attackCommitTimer = ATTACK_SPECIAL.commitDuration
+    blade.attackSlashTimer = ATTACK_SPECIAL.slashDuration
+    burst(blade, powerScale, aimDirection)
+    noiseBurst(0.06, 0.09)
+    beep({ freq: 220, duration: 0.05, type: 'sawtooth', gain: 0.03, slideTo: 120 })
   }
 
   function stabilise(blade, dt) {
@@ -346,41 +1002,76 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     blade.rb.setLinvel({ x: lv.x * (1 - 0.8 * dt), y: 0, z: lv.z * (1 - 0.8 * dt) }, true)
   }
 
-  function triggerSpecial(blade) {
-    if (blade.special < 100) return
-    blade.special = 0
-    blade.lastImpact = 0.8
-    blade.ultGlow = 1
-    status.value = `${blade.name} used ${blade.def.specialName}!`
-    if (blade.key === 'attack') {
-      blade.smashWindow = 1
-      burst(blade, 1.8)
-      noiseBurst(0.05, 0.08)
-    } else if (blade.key === 'defense') {
-      blade.guarding = 1.8
-      blade.wobble *= 0.3
-    } else if (blade.key === 'stamina') {
-      blade.silentOrbit = 2.4
-      blade.wobble *= 0.4
-    } else if (blade.key === 'rubber') {
-      blade.vampireDrain = 2.2
-    }
-  }
-
-  function pickCpuTarget(runtimeState, cpuBlade) {
+  function pickNearestOpponent(runtimeState, sourceBlade) {
     let best = null
     let bestDist = Number.POSITIVE_INFINITY
-    const cpuPos = cpuBlade.rb.translation()
+    const sourcePos = sourceBlade.rb.translation()
     for (const blade of runtimeState.blades) {
-      if (blade.id === cpuBlade.id || !blade.alive) continue
+      if (blade.id === sourceBlade.id || !blade.alive) continue
       const otherPos = blade.rb.translation()
-      const dist = Math.hypot(otherPos.x - cpuPos.x, otherPos.z - cpuPos.z)
+      const dist = Math.hypot(otherPos.x - sourcePos.x, otherPos.z - sourcePos.z)
       if (dist < bestDist) {
         bestDist = dist
         best = blade
       }
     }
     return best
+  }
+
+  function triggerSpecial(blade, runtimeState) {
+    if (blade.special < 100) return
+    blade.special = 0
+    blade.lastImpact = 0.8
+    blade.ultGlow = 1
+    status.value = `${blade.name} used ${blade.def.specialName}!`
+    if (blade.key === 'attack') {
+      const target = runtimeState ? pickNearestOpponent(runtimeState, blade) : null
+      blade.attackTargetId = target?.id || null
+      blade.attackLockTimer = target ? ATTACK_SPECIAL.lockDuration : 0
+      blade.attackRushTimer = 0
+      blade.attackCommitTimer = target ? ATTACK_SPECIAL.lockDuration : ATTACK_SPECIAL.commitDuration * 0.72
+      blade.attackSnapTimer = target ? ATTACK_SPECIAL.snapDuration : 0
+      blade.attackSlashTimer = 0
+      if (target) {
+        status.value = `${blade.name} locked onto ${target.name}!`
+        beep({ freq: 780, duration: 0.04, type: 'square', gain: 0.02, slideTo: 860 })
+      } else {
+        startAttackRush(blade, runtimeState, ATTACK_SPECIAL.fallbackPowerScale)
+      }
+    } else if (blade.key === 'defense') {
+      blade.guarding = DEFENSE_SPECIAL.guardDuration
+      blade.wobble *= DEFENSE_SPECIAL.wobbleScale
+      blade.defenseReflectFlash = DEFENSE_SPECIAL.reflectFlashDuration * 0.7
+    } else if (blade.key === 'stamina') {
+      blade.silentOrbit = STAMINA_SPECIAL.duration
+      blade.silentOrbitPulse = STAMINA_SPECIAL.pulseDuration
+      blade.wobble *= STAMINA_SPECIAL.wobbleScale
+      const lv = blade.rb.linvel()
+      const pos = blade.rb.translation()
+      const radius = Math.hypot(pos.x, pos.z)
+      const inward = radius > STAMINA_SPECIAL.recenterStartRadius
+        ? clamp01((radius - STAMINA_SPECIAL.recenterStartRadius) / (STADIUM.lipRadius - STAMINA_SPECIAL.recenterStartRadius))
+        : 0
+      const nx = radius > 0.001 ? pos.x / radius : 0
+      const nz = radius > 0.001 ? pos.z / radius : 0
+      blade.rb.setLinvel({
+        x: lv.x * STAMINA_SPECIAL.activationVelocityCleanse - nx * inward * 1.8,
+        y: 0,
+        z: lv.z * STAMINA_SPECIAL.activationVelocityCleanse - nz * inward * 1.8,
+      }, true)
+      if (blade.spin < STAMINA_SPECIAL.activationRefundThreshold) {
+        blade.spin = Math.min(80, blade.spin + STAMINA_SPECIAL.activationRefund)
+      }
+      beep({ freq: 430, duration: 0.08, type: 'triangle', gain: 0.022, slideTo: 760 })
+    } else if (blade.key === 'rubber') {
+      blade.vampireDrain = RUBBER_SPECIAL.duration
+      blade.rubberDrainPulse = RUBBER_SPECIAL.pulseDuration
+      beep({ freq: 320, duration: 0.08, type: 'sawtooth', gain: 0.024, slideTo: 180 })
+    }
+  }
+
+  function pickCpuTarget(runtimeState, cpuBlade) {
+    return pickNearestOpponent(runtimeState, cpuBlade)
   }
 
   function runCpuBrain(runtimeState, cpuBlade, dt) {
@@ -479,11 +1170,11 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       stabilise(cpuBlade, dt)
     }
     if (cpuBlade.special >= 100 && Math.random() < 0.04) {
-      triggerSpecial(cpuBlade)
+      triggerSpecial(cpuBlade, runtimeState)
     }
   }
 
-  function applyHumanInput(blade, input, dt, phase) {
+  function applyHumanInput(blade, input, dt, phase, runtimeState = null) {
     if (!input || !blade.alive) return
     if (phase === 'aiming') {
       if (input.aimLeft) blade.launchAngle -= 2.2 * dt
@@ -494,33 +1185,74 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     }
 
     const lv = blade.rb.linvel()
-    const nudge = 7.6 * blade.def.stats.grip
-    blade.rb.setLinvel({
-      x: lv.x + input.moveX * nudge * dt,
-      y: 0,
-      z: lv.z + input.moveZ * nudge * dt,
-    }, true)
-    if (input.burst) burst(blade)
-    if (input.stabilise) stabilise(blade, dt)
-    if (input.special) triggerSpecial(blade)
+    const controlScale = blade.attackCommitTimer > 0 ? 0.18 : 1
+    const orbitActive = blade.silentOrbit > 0
+    const nudge = 7.6 * blade.def.stats.grip * (orbitActive ? STAMINA_SPECIAL.controlBoost : 1)
+    let nextX = lv.x + input.moveX * nudge * dt * controlScale
+    let nextZ = lv.z + input.moveZ * nudge * dt * controlScale
+    if (orbitActive) {
+      const moveMag = Math.hypot(input.moveX, input.moveZ)
+      if (moveMag > 0.05) {
+        const desiredX = input.moveX / moveMag
+        const desiredZ = input.moveZ / moveMag
+        const along = nextX * desiredX + nextZ * desiredZ
+        const lateralX = nextX - desiredX * along
+        const lateralZ = nextZ - desiredZ * along
+        const damp = Math.min(1, STAMINA_SPECIAL.lateralDamping * dt)
+        nextX -= lateralX * damp
+        nextZ -= lateralZ * damp
+      } else {
+        const driftDamp = Math.min(0.45, STAMINA_SPECIAL.idleDriftDamping * dt)
+        nextX *= 1 - driftDamp
+        nextZ *= 1 - driftDamp
+      }
+    }
+    blade.rb.setLinvel({ x: nextX, y: 0, z: nextZ }, true)
+    if (blade.attackCommitTimer <= 0) {
+      if (input.burst) burst(blade)
+      if (input.stabilise) stabilise(blade, dt)
+      if (input.special) triggerSpecial(blade, runtimeState)
+    }
   }
 
-  function updateBlade(blade, dt) {
+  function updateBlade(blade, dt, runtimeState) {
     blade.boostCooldown = Math.max(0, blade.boostCooldown - dt)
     blade.guarding = Math.max(0, blade.guarding - dt)
+    const hadOrbit = blade.silentOrbit > 0
     blade.silentOrbit = Math.max(0, blade.silentOrbit - dt)
+    blade.silentOrbitPulse = Math.max(0, blade.silentOrbitPulse - dt)
     blade.vampireDrain = Math.max(0, blade.vampireDrain - dt)
+    blade.rubberDrainBurst = Math.max(0, blade.rubberDrainBurst - dt)
+    blade.rubberDrainPulse = Math.max(0, blade.rubberDrainPulse - dt)
+    blade.defenseReflectFlash = Math.max(0, blade.defenseReflectFlash - dt)
     blade.smashWindow = Math.max(0, blade.smashWindow - dt)
+    const hadLock = blade.attackLockTimer > 0
+    blade.attackLockTimer = Math.max(0, blade.attackLockTimer - dt)
+    blade.attackRushTimer = Math.max(0, blade.attackRushTimer - dt)
+    blade.attackCommitTimer = Math.max(0, blade.attackCommitTimer - dt)
+    blade.attackSnapTimer = Math.max(0, blade.attackSnapTimer - dt)
+    blade.attackSlashTimer = Math.max(0, blade.attackSlashTimer - dt)
     blade.lastImpact = Math.max(0, blade.lastImpact - dt * 2.6)
     blade.ultGlow = Math.max(0, blade.ultGlow - dt * 1.4)
+
+    if (hadLock && blade.attackLockTimer <= 0 && blade.attackTargetId) {
+      startAttackRush(blade, runtimeState)
+    }
+    if (hadOrbit && blade.silentOrbit <= 0 && blade.alive) {
+      blade.spin = Math.min(80, blade.spin + STAMINA_SPECIAL.completionRefund)
+      blade.silentOrbitPulse = Math.max(blade.silentOrbitPulse, STAMINA_SPECIAL.pulseDuration)
+      blade.ultGlow = Math.max(blade.ultGlow, 0.72)
+      beep({ freq: 620, duration: 0.07, type: 'triangle', gain: 0.02, slideTo: 940 })
+    }
+
     if (!blade.alive) {
+      hideBladeEffects(blade)
       updateRingOutVisual(blade, dt)
       return
     }
 
     const pos = blade.rb.translation()
     const lv = blade.rb.linvel()
-    const speed = Math.hypot(lv.x, lv.z)
     const radius = Math.hypot(pos.x, pos.z)
     if (radius > STADIUM.flatRadius) {
       const slope = getStadiumSlope(radius)
@@ -530,7 +1262,44 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.rb.setLinvel({ x: lv.x + nx * bowlAccel * dt, y: 0, z: lv.z + nz * bowlAccel * dt }, true)
     }
 
-    const radialVel = radius > 0.001 ? (lv.x * pos.x + lv.z * pos.z) / radius : 0
+    let tunedLv = blade.rb.linvel()
+    if (blade.silentOrbit > 0 && radius > 0.001) {
+      const nx = pos.x / radius
+      const nz = pos.z / radius
+      const inward = clamp01((radius - STAMINA_SPECIAL.recenterStartRadius) / (STADIUM.lipRadius - STAMINA_SPECIAL.recenterStartRadius))
+      if (inward > 0) {
+        const outwardVel = Math.max(0, tunedLv.x * nx + tunedLv.z * nz)
+        const recenter = (STAMINA_SPECIAL.recenterForce * inward + outwardVel * STAMINA_SPECIAL.outwardBrake * inward) * dt
+        blade.rb.setLinvel({ x: tunedLv.x - nx * recenter, y: 0, z: tunedLv.z - nz * recenter }, true)
+        tunedLv = blade.rb.linvel()
+      }
+    }
+
+    if (blade.attackRushTimer > 0 && runtimeState) {
+      const target = getBladeTarget(runtimeState, blade)
+      if (target?.alive) {
+        const targetPos = target.rb.translation()
+        const bladePos = blade.rb.translation()
+        const aimX = targetPos.x - bladePos.x
+        const aimZ = targetPos.z - bladePos.z
+        const aimMag = Math.hypot(aimX, aimZ)
+        if (aimMag > 0.001) {
+          const dirX = aimX / aimMag
+          const dirZ = aimZ / aimMag
+          const current = blade.rb.linvel()
+          const guidedSpeed = Math.max(ATTACK_SPECIAL.guidedSpeedFloor, Math.hypot(current.x, current.z))
+          blade.rb.setLinvel({
+            x: current.x * (1 - ATTACK_SPECIAL.guidedBlend) + dirX * guidedSpeed * ATTACK_SPECIAL.guidedBlend,
+            y: 0,
+            z: current.z * (1 - ATTACK_SPECIAL.guidedBlend) + dirZ * guidedSpeed * ATTACK_SPECIAL.guidedBlend,
+          }, true)
+          blade.launchAngle = Math.atan2(dirZ, dirX)
+        }
+      }
+    }
+
+    const speed = Math.hypot(tunedLv.x, tunedLv.z)
+    const radialVel = radius > 0.001 ? (tunedLv.x * pos.x + tunedLv.z * pos.z) / radius : 0
     if (radius > STADIUM.lipRadius && radialVel > 0.35) {
       blade.deathType = 'ring_out'
       blade.alive = false
@@ -539,8 +1308,8 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
     let drain = 1.6 + speed * 0.13 + blade.wobble * 1.2
     drain /= blade.def.stats.stamina
-    if (blade.silentOrbit > 0) drain *= 0.45
-    if (blade.guarding > 0) drain *= 0.82
+    if (blade.silentOrbit > 0) drain *= STAMINA_SPECIAL.passiveDrainMultiplier
+    if (blade.guarding > 0) drain *= DEFENSE_SPECIAL.passiveDrainMultiplier
     blade.spin = Math.max(0, blade.spin - drain * dt)
     blade.special = Math.min(100, blade.special + (0.9 + speed * 0.06) * dt * 10)
     if (blade.spin < 7) blade.wobble = Math.min(0.45, blade.wobble + 0.3 * dt)
@@ -550,6 +1319,20 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.alive = false
       blade.deathType = blade.deathType || 'spin_out'
       blade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
+    }
+    if (!blade.alive) {
+      blade.attackLockTimer = 0
+      blade.attackRushTimer = 0
+      blade.attackCommitTimer = 0
+      blade.attackTargetId = null
+      blade.attackSnapTimer = 0
+      blade.attackSlashTimer = 0
+      blade.silentOrbitPulse = 0
+      blade.rubberDrainBurst = 0
+      blade.rubberDrainPulse = 0
+      blade.rubberDrainTargetId = null
+      blade.defenseReflectFlash = 0
+      hideBladeEffects(blade)
     }
     syncMesh(blade)
   }
@@ -569,30 +1352,60 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     const lvb = b.rb.linvel()
     const relV = (lvb.x - lva.x) * nx + (lvb.z - lva.z) * nz
     const impact = Math.abs(relV) + Math.abs(a.spin - b.spin) * 0.055
-    const attackModA = a.def.stats.smash * (a.smashWindow > 0 ? 1.45 : 1)
-    const attackModB = b.def.stats.smash * (b.smashWindow > 0 ? 1.45 : 1)
-    const defenseA = a.def.stats.defense * (a.guarding > 0 ? 1.4 : 1)
-    const defenseB = b.def.stats.defense * (b.guarding > 0 ? 1.4 : 1)
-    const pushA = (1.2 + impact * 0.35) * (attackModB / defenseA)
-    const pushB = (1.2 + impact * 0.35) * (attackModA / defenseB)
+    const attackModA = a.def.stats.smash * (a.smashWindow > 0 ? ATTACK_SPECIAL.smashMultiplier : 1)
+    const attackModB = b.def.stats.smash * (b.smashWindow > 0 ? ATTACK_SPECIAL.smashMultiplier : 1)
+    const defenseA = a.def.stats.defense * (a.guarding > 0 ? DEFENSE_SPECIAL.defenseMultiplier : 1)
+    const defenseB = b.def.stats.defense * (b.guarding > 0 ? DEFENSE_SPECIAL.defenseMultiplier : 1)
+    let pushA = (1.2 + impact * 0.35) * (attackModB / defenseA)
+    let pushB = (1.2 + impact * 0.35) * (attackModA / defenseB)
+    if (a.guarding > 0) {
+      pushA *= DEFENSE_SPECIAL.guardedPushAbsorb
+      pushB += DEFENSE_SPECIAL.reflectPushBonus + impact * DEFENSE_SPECIAL.reflectPushImpactScale
+      a.defenseReflectFlash = Math.max(a.defenseReflectFlash, DEFENSE_SPECIAL.reflectFlashDuration)
+      a.ultGlow = Math.max(a.ultGlow, 0.75)
+      a.lastImpact = Math.max(a.lastImpact, 0.7)
+    }
+    if (b.guarding > 0) {
+      pushB *= DEFENSE_SPECIAL.guardedPushAbsorb
+      pushA += DEFENSE_SPECIAL.reflectPushBonus + impact * DEFENSE_SPECIAL.reflectPushImpactScale
+      b.defenseReflectFlash = Math.max(b.defenseReflectFlash, DEFENSE_SPECIAL.reflectFlashDuration)
+      b.ultGlow = Math.max(b.ultGlow, 0.75)
+      b.lastImpact = Math.max(b.lastImpact, 0.7)
+    }
     a.rb.setLinvel({ x: lva.x - nx * pushA, y: 0, z: lva.z - nz * pushA }, true)
     b.rb.setLinvel({ x: lvb.x + nx * pushB, y: 0, z: lvb.z + nz * pushB }, true)
 
     let spinLossA = (0.7 + impact * 0.12) / defenseA
     let spinLossB = (0.7 + impact * 0.12) / defenseB
-    if (a.silentOrbit > 0) spinLossA *= 0.6
-    if (b.silentOrbit > 0) spinLossB *= 0.6
+    if (a.guarding > 0) {
+      spinLossA *= DEFENSE_SPECIAL.guardedSpinAbsorb
+      spinLossB += DEFENSE_SPECIAL.reflectSpinBonus + impact * DEFENSE_SPECIAL.reflectSpinImpactScale
+    }
+    if (b.guarding > 0) {
+      spinLossB *= DEFENSE_SPECIAL.guardedSpinAbsorb
+      spinLossA += DEFENSE_SPECIAL.reflectSpinBonus + impact * DEFENSE_SPECIAL.reflectSpinImpactScale
+    }
+    if (a.silentOrbit > 0) spinLossA *= STAMINA_SPECIAL.collisionDrainMultiplier
+    if (b.silentOrbit > 0) spinLossB *= STAMINA_SPECIAL.collisionDrainMultiplier
     a.spin = Math.max(0, a.spin - spinLossA)
     b.spin = Math.max(0, b.spin - spinLossB)
     if (a.vampireDrain > 0) {
       const steal = Math.min(1.25, spinLossB * 0.9)
       b.spin = Math.max(0, b.spin - steal)
       a.spin = Math.min(80, a.spin + steal * 0.75)
+      a.rubberDrainBurst = RUBBER_SPECIAL.burstDuration
+      a.rubberDrainPulse = Math.max(a.rubberDrainPulse, RUBBER_SPECIAL.pulseDuration)
+      a.rubberDrainTargetId = b.id
+      a.ultGlow = Math.max(a.ultGlow, 0.78)
     }
     if (b.vampireDrain > 0) {
       const steal = Math.min(1.25, spinLossA * 0.9)
       a.spin = Math.max(0, a.spin - steal)
       b.spin = Math.min(80, b.spin + steal * 0.75)
+      b.rubberDrainBurst = RUBBER_SPECIAL.burstDuration
+      b.rubberDrainPulse = Math.max(b.rubberDrainPulse, RUBBER_SPECIAL.pulseDuration)
+      b.rubberDrainTargetId = a.id
+      b.ultGlow = Math.max(b.ultGlow, 0.78)
     }
     a.special = Math.min(100, a.special + impact * 1.1)
     b.special = Math.min(100, b.special + impact * 1.1)
@@ -627,8 +1440,19 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       blade.wobble = playerSnapshot.wobble
       blade.guarding = playerSnapshot.guarding
       blade.silentOrbit = playerSnapshot.silentOrbit
+      blade.silentOrbitPulse = playerSnapshot.silentOrbitPulse || 0
       blade.vampireDrain = playerSnapshot.vampireDrain
+      blade.rubberDrainBurst = playerSnapshot.rubberDrainBurst || 0
+      blade.rubberDrainTargetId = playerSnapshot.rubberDrainTargetId || null
+      blade.rubberDrainPulse = playerSnapshot.rubberDrainPulse || 0
+      blade.defenseReflectFlash = playerSnapshot.defenseReflectFlash || 0
       blade.smashWindow = playerSnapshot.smashWindow
+      blade.attackLockTimer = playerSnapshot.attackLockTimer || 0
+      blade.attackRushTimer = playerSnapshot.attackRushTimer || 0
+      blade.attackCommitTimer = playerSnapshot.attackCommitTimer || 0
+      blade.attackTargetId = playerSnapshot.attackTargetId || null
+      blade.attackSnapTimer = playerSnapshot.attackSnapTimer || 0
+      blade.attackSlashTimer = playerSnapshot.attackSlashTimer || 0
       blade.ultGlow = playerSnapshot.ultGlow
       blade.visualSpin = playerSnapshot.visualSpin
       blade.deathType = playerSnapshot.deathType
@@ -747,8 +1571,115 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       scene.add(meshPack.group)
       const bladeLight = new THREE.PointLight(new THREE.Color(def.color), 0, 8, 2)
       scene.add(bladeLight)
+      const defenseShield = createDefenseShield(def.color, def.accent)
+      defenseShield.visible = false
+      scene.add(defenseShield)
+      const staminaOrbit = createStaminaOrbit(def.color, def.accent)
+      staminaOrbit.visible = false
+      scene.add(staminaOrbit)
+      const staminaFloorRing = new THREE.Mesh(
+        new THREE.RingGeometry(0.8, 1.26, 40),
+        new THREE.MeshBasicMaterial({
+          color: def.accent,
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      )
+      staminaFloorRing.rotation.x = -Math.PI / 2
+      staminaFloorRing.visible = false
+      scene.add(staminaFloorRing)
+      const staminaPulse = new THREE.Mesh(
+        new THREE.RingGeometry(0.54, 0.96, 40),
+        new THREE.MeshBasicMaterial({
+          color: 0xd7f0ff,
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      )
+      staminaPulse.rotation.x = -Math.PI / 2
+      staminaPulse.visible = false
+      scene.add(staminaPulse)
+      const rubberAura = createRubberAura(def.color, def.accent)
+      rubberAura.visible = false
+      scene.add(rubberAura)
+      const rubberFloorRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.78, 0.038, 8, 36),
+        new THREE.MeshBasicMaterial({
+          color: def.accent,
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      )
+      rubberFloorRing.visible = false
+      scene.add(rubberFloorRing)
+      const rubberPulse = new THREE.Mesh(
+        new THREE.TorusGeometry(0.88, 0.055, 8, 32),
+        new THREE.MeshBasicMaterial({
+          color: 0xf2d7ff,
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      )
+      rubberPulse.visible = false
+      scene.add(rubberPulse)
+      const rubberDrainParticles = createRubberDrainParticles(def.color, def.accent)
+      rubberDrainParticles.visible = false
+      scene.add(rubberDrainParticles)
+      const rubberDrainTrail = createRubberDrainTrail(0x5b168c)
+      scene.add(rubberDrainTrail)
+      const defenseShieldBurst = new THREE.Mesh(
+        new THREE.RingGeometry(0.92, 1.34, 28),
+        new THREE.MeshBasicMaterial({
+          color: def.accent,
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      )
+      defenseShieldBurst.rotation.x = -Math.PI / 2
+      defenseShieldBurst.visible = false
+      scene.add(defenseShieldBurst)
       const arrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0), 2.2, new THREE.Color(def.color), 0.55, 0.28)
       scene.add(arrow)
+      const lockRing = createCornerMarker(3.05, 0.9, 0.2, 0xff7a18)
+      lockRing.visible = false
+      scene.add(lockRing)
+      const lockRingOuter = createCornerMarker(4.05, 1.08, 0.24, 0xffe066)
+      lockRingOuter.visible = false
+      scene.add(lockRingOuter)
+      const lockFlash = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.7, 1.7),
+        new THREE.MeshBasicMaterial({ color: 0xffc14d, transparent: true, opacity: 0, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false })
+      )
+      lockFlash.rotation.x = -Math.PI / 2
+      lockFlash.renderOrder = ATTACK_UI_RENDER_ORDER
+      lockFlash.visible = false
+      scene.add(lockFlash)
+      const lockBeamGeometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()])
+      const lockBeam = new THREE.Line(
+        lockBeamGeometry,
+        new THREE.LineBasicMaterial({ color: 0xfff2a8, transparent: true, opacity: 0, depthTest: false, depthWrite: false })
+      )
+      lockBeam.renderOrder = ATTACK_UI_RENDER_ORDER
+      lockBeam.visible = false
+      scene.add(lockBeam)
+      const lockSlash = createAttackSlash(0xfff3bf)
+      lockSlash.visible = false
+      scene.add(lockSlash)
 
       const spawn = spawnPoints[index]
       const rb = world.createRigidBody(
@@ -776,7 +1707,22 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         aura: meshPack.aura,
         rb,
         bladeLight,
+        defenseShield,
+        staminaOrbit,
+        staminaFloorRing,
+        staminaPulse,
+        rubberAura,
+        rubberFloorRing,
+        rubberPulse,
+        rubberDrainParticles,
+        rubberDrainTrail,
+        defenseShieldBurst,
         arrow,
+        lockRing,
+        lockRingOuter,
+        lockFlash,
+        lockBeam,
+        lockSlash,
         spawn,
         radius: 0.78,
         spin: 0,
@@ -786,8 +1732,21 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         alive: true,
         guarding: 0,
         silentOrbit: 0,
+        silentOrbitPulse: 0,
         vampireDrain: 0,
+        rubberDrainBurst: 0,
+        rubberDrainTargetId: null,
+        rubberDrainPulse: 0,
+        defenseReflectFlash: 0,
         smashWindow: 0,
+        attackLockTimer: 0,
+        attackRushTimer: 0,
+        attackCommitTimer: 0,
+        attackTargetId: null,
+        attackSnapTimer: 0,
+        attackSlashTimer: 0,
+        cpuLaunchCharge: CPU_LAUNCH.baseCharge,
+        cpuLaunchAngle: spawn.angle,
         boostCooldown: 0,
         lastImpact: 0,
         launchAngle: spawn.angle,
@@ -796,7 +1755,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         ultGlow: 0,
         visualSpin: 0,
         ringOutVisual: null,
-        charge: participant.kind === 'cpu' ? 0.72 : 0,
+        charge: participant.kind === 'cpu' ? CPU_LAUNCH.baseCharge : 0,
       }
       blades.push(blade)
       bladesById.set(participant.id, blade)
@@ -847,10 +1806,71 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       if (blade.id === runtimeState.localPlayerId) aimAngle.value = blade.launchAngle
     }
 
+    function updateAttackLockVisual(blade) {
+      const target = getBladeTarget(runtimeState, blade)
+      const showLock = target?.alive && (blade.attackLockTimer > 0 || blade.attackRushTimer > 0)
+      blade.lockRing.visible = showLock
+      blade.lockRingOuter.visible = showLock
+      blade.lockFlash.visible = showLock
+      blade.lockBeam.visible = showLock
+      blade.lockSlash.visible = blade.attackSlashTimer > 0 && !!target?.alive
+      if (!showLock) {
+        setMarkerOpacity(blade.lockRing, 0)
+        setMarkerOpacity(blade.lockRingOuter, 0)
+        blade.lockFlash.material.opacity = 0
+        blade.lockBeam.material.opacity = 0
+      }
+      if (!target?.alive) {
+        blade.lockSlash.visible = false
+        setMarkerOpacity(blade.lockSlash, 0)
+        return
+      }
+
+      const targetPos = target.rb.translation()
+      const bladePos = blade.rb.translation()
+      const time = performance.now()
+      const pulse = 1 + Math.sin(time * 0.032) * 0.08
+      const outerPulse = 1 + Math.sin(time * 0.026 + 0.8) * 0.11
+      const flashPulse = 0.9 + Math.sin(time * 0.045) * 0.08
+      const snapProgress = blade.attackSnapTimer > 0
+        ? 1 - clamp01(blade.attackSnapTimer / ATTACK_SPECIAL.snapDuration)
+        : 1
+      const lockProgress = blade.attackLockTimer > 0
+        ? 1 - clamp01(blade.attackLockTimer / ATTACK_SPECIAL.lockDuration)
+        : 1
+      const ringY = getSurfaceYAtXZ(targetPos.x, targetPos.z, 0.06)
+      blade.lockRing.position.set(targetPos.x, ringY, targetPos.z)
+      blade.lockRingOuter.position.set(targetPos.x, ringY + 0.015, targetPos.z)
+      blade.lockFlash.position.set(targetPos.x, ringY - 0.01, targetPos.z)
+      const snapBoost = blade.attackSnapTimer > 0 ? 1.42 - snapProgress * 0.42 : 1
+      blade.lockRing.scale.setScalar((blade.attackLockTimer > 0 ? pulse + lockProgress * 0.12 : 1.18) * snapBoost)
+      blade.lockRingOuter.scale.setScalar((blade.attackLockTimer > 0 ? outerPulse + lockProgress * 0.16 : 1.34) * (blade.attackSnapTimer > 0 ? 1.22 - snapProgress * 0.22 : 1))
+      blade.lockFlash.scale.setScalar(blade.attackLockTimer > 0 ? flashPulse + lockProgress * 0.2 : 1.06)
+      setMarkerOpacity(blade.lockRing, blade.attackLockTimer > 0 ? 1 : 0.82)
+      setMarkerOpacity(blade.lockRingOuter, blade.attackLockTimer > 0 ? 0.46 : 0.24)
+      blade.lockFlash.material.opacity = blade.attackLockTimer > 0 ? 0.18 + lockProgress * 0.14 : 0.1
+
+      if (blade.lockBeam.visible) {
+        const beamStart = new THREE.Vector3(bladePos.x, getSurfaceYAtXZ(bladePos.x, bladePos.z, 0.26), bladePos.z)
+        const beamEnd = new THREE.Vector3(targetPos.x, ringY + 0.05, targetPos.z)
+        blade.lockBeam.geometry.setFromPoints([beamStart, beamEnd])
+        blade.lockBeam.material.opacity = blade.attackLockTimer > 0 ? 0.95 : 0.4
+      }
+
+      if (blade.lockSlash.visible) {
+        const slashProgress = 1 - clamp01(blade.attackSlashTimer / ATTACK_SPECIAL.slashDuration)
+        blade.lockSlash.position.set(targetPos.x, ringY + 0.025, targetPos.z)
+        blade.lockSlash.scale.setScalar(0.7 + slashProgress * 0.85)
+        setMarkerOpacity(blade.lockSlash, 0.75 * (1 - slashProgress))
+      } else {
+        setMarkerOpacity(blade.lockSlash, 0)
+      }
+    }
+
     function resetRound() {
       runtimeState.roundResolved = false
       runtimeState.phase = 'aiming'
-      runtimeState.countdownTimer = 3.5
+      runtimeState.countdownTimer = AIM_COUNTDOWN_DURATION
       runtimeState.nextCountdownIndex = 0
       countdown.value = 3
       roundResult.value = null
@@ -864,8 +1884,20 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         blade.alive = true
         blade.guarding = 0
         blade.silentOrbit = 0
+        blade.silentOrbitPulse = 0
         blade.vampireDrain = 0
+        blade.rubberDrainBurst = 0
+        blade.rubberDrainTargetId = null
+        blade.rubberDrainPulse = 0
+        blade.defenseReflectFlash = 0
         blade.smashWindow = 0
+        blade.attackLockTimer = 0
+        blade.attackRushTimer = 0
+        blade.attackCommitTimer = 0
+        blade.attackTargetId = null
+        blade.attackSnapTimer = 0
+        blade.attackSlashTimer = 0
+        hideBladeEffects(blade)
         blade.boostCooldown = 0
         blade.lastImpact = 0
         blade.ultGlow = 0
@@ -873,9 +1905,16 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         blade.deathType = null
         blade.ringOutVisual = null
         blade.launchPower = 0
-        blade.charge = blade.kind === 'cpu' ? 0.72 : 0
-        blade.launchAngle = blade.spawn.angle
+        if (blade.kind === 'cpu') {
+          rollCpuLaunchProfile(blade)
+          blade.charge = 0
+          blade.launchAngle = blade.spawn.angle
+        } else {
+          blade.charge = 0
+          blade.launchAngle = blade.spawn.angle
+        }
         setBladeArrow(blade)
+        updateAttackLockVisual(blade)
         syncMesh(blade)
       }
       updateHud(runtimeState)
@@ -890,6 +1929,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
           ? 46 + 12 * blade.def.stats.stamina
           : 38 + blade.charge * 28 * blade.def.stats.stamina
         blade.arrow.visible = false
+        updateAttackLockVisual(blade)
       }
       runtimeState.phase = 'fighting'
       countdown.value = null
@@ -962,12 +2002,13 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
           for (const blade of runtimeState.blades) {
             if (blade.kind === 'cpu') {
-              blade.charge = 0.72
-              blade.launchAngle = blade.spawn.angle
+              const aimProgress = clamp01(1 - runtimeState.countdownTimer / AIM_COUNTDOWN_DURATION)
+              blade.charge = mix(0, blade.cpuLaunchCharge, aimProgress)
+              blade.launchAngle = mix(blade.spawn.angle, blade.cpuLaunchAngle, aimProgress)
             } else if (blade.id === runtimeState.localPlayerId) {
-              applyHumanInput(blade, runtimeState.localInput, dt, 'aiming')
+              applyHumanInput(blade, runtimeState.localInput, dt, 'aiming', runtimeState)
             } else {
-              applyHumanInput(blade, runtimeState.remoteInputs.get(blade.id) || {}, dt, 'aiming')
+              applyHumanInput(blade, runtimeState.remoteInputs.get(blade.id) || {}, dt, 'aiming', runtimeState)
             }
             setBladeArrow(blade)
           }
@@ -976,8 +2017,8 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         } else if (runtimeState.phase === 'fighting') {
           for (const blade of runtimeState.blades) {
             if (blade.kind === 'cpu') runCpuBrain(runtimeState, blade, dt)
-            else if (blade.id === runtimeState.localPlayerId) applyHumanInput(blade, runtimeState.localInput, dt, 'fighting')
-            else applyHumanInput(blade, runtimeState.remoteInputs.get(blade.id) || {}, dt, 'fighting')
+            else if (blade.id === runtimeState.localPlayerId) applyHumanInput(blade, runtimeState.localInput, dt, 'fighting', runtimeState)
+            else applyHumanInput(blade, runtimeState.remoteInputs.get(blade.id) || {}, dt, 'fighting', runtimeState)
           }
           runtimeState.world.step()
           for (let i = 0; i < runtimeState.blades.length; i++) {
@@ -986,13 +2027,17 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
             }
           }
           for (const blade of runtimeState.blades) {
-            updateBlade(blade, dt)
+            updateBlade(blade, dt, runtimeState)
+            updateAttackLockVisual(blade)
           }
           if (runtimeState.blades.filter((blade) => blade.alive).length <= 1) {
             resolveRound()
           }
         } else if (runtimeState.phase === 'round_end') {
-          for (const blade of runtimeState.blades) updateBlade(blade, dt)
+          for (const blade of runtimeState.blades) {
+            updateBlade(blade, dt, runtimeState)
+            updateAttackLockVisual(blade)
+          }
           runtimeState.roundResetTimer -= dt
           if (runtimeState.roundResetTimer <= 0) {
             if (runtimeState.matchOver) {
@@ -1016,6 +2061,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         }
         if (roomApi?.latestSnapshot?.value) {
           applySnapshot(runtimeState, roomApi.latestSnapshot.value)
+        }
+        for (const blade of runtimeState.blades) {
+          updateAttackLockVisual(blade)
         }
       }
 
