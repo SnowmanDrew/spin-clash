@@ -1,5 +1,7 @@
 import { computed, onUnmounted, ref } from 'vue'
 
+const RECONNECT_KEY_STORAGE_KEY = 'spin-clash:reconnect-key'
+
 function createEmptyRecord() {
   return {
     cpu: { wins: 0, losses: 0 },
@@ -56,6 +58,22 @@ function getDefaultSocketUrl() {
   return `${protocol}//${host}/ws`
 }
 
+function createReconnectKey() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `reconnect-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`
+}
+
+function loadReconnectKey() {
+  if (typeof window === 'undefined') return createReconnectKey()
+  const stored = window.localStorage.getItem(RECONNECT_KEY_STORAGE_KEY)?.trim()
+  if (stored) return stored
+  const nextKey = createReconnectKey()
+  window.localStorage.setItem(RECONNECT_KEY_STORAGE_KEY, nextKey)
+  return nextKey
+}
+
 export function useRoomConnection() {
   const socket = ref(null)
   const connectionState = ref('offline')
@@ -67,8 +85,12 @@ export function useRoomConnection() {
   const room = ref(null)
   const latestSnapshot = ref(null)
   const latestMatchConfig = ref(null)
+  const hostMigration = ref(null)
   const remoteInput = ref(null)
   const remoteLaunchCommit = ref(null)
+  const serverTimeOffset = ref(0)
+  const reconnectKey = loadReconnectKey()
+  let timeSyncTimer = null
 
   function normalizePlayerName(name) {
     return String(name || '').trim() || 'Blader'
@@ -78,6 +100,26 @@ export function useRoomConnection() {
     if (!socket.value || socket.value.readyState !== WebSocket.OPEN) return false
     socket.value.send(JSON.stringify({ type, ...payload }))
     return true
+  }
+
+  function estimateServerTime() {
+    return Date.now() + serverTimeOffset.value
+  }
+
+  function stopTimeSync() {
+    if (!timeSyncTimer) return
+    clearInterval(timeSyncTimer)
+    timeSyncTimer = null
+  }
+
+  function requestTimeSync() {
+    send('time_sync', { clientSentAt: Date.now() })
+  }
+
+  function startTimeSync() {
+    stopTimeSync()
+    requestTimeSync()
+    timeSyncTimer = setInterval(requestTimeSync, 5000)
   }
 
   function syncRoomUrl(roomId) {
@@ -92,15 +134,19 @@ export function useRoomConnection() {
     nextSocket.addEventListener('open', () => {
       connectionState.value = 'connected'
       errorMessage.value = ''
+      startTimeSync()
     })
 
     nextSocket.addEventListener('close', () => {
+      stopTimeSync()
       connectionState.value = 'offline'
       room.value = null
       latestSnapshot.value = null
       latestMatchConfig.value = null
+      hostMigration.value = null
       remoteInput.value = null
       remoteLaunchCommit.value = null
+      serverTimeOffset.value = 0
     })
 
     nextSocket.addEventListener('message', (event) => {
@@ -115,7 +161,10 @@ export function useRoomConnection() {
         case 'welcome':
           clientId.value = message.clientId
           playerName.value = normalizePlayerName(playerName.value || message.playerName)
-          send('set_identity', { name: playerName.value, build: playerLoadout.value.layer, loadout: playerLoadout.value, record: playerRecord.value })
+          send('set_identity', { name: playerName.value, build: playerLoadout.value.layer, loadout: playerLoadout.value, record: playerRecord.value, reconnectKey })
+          break
+        case 'identity_claimed':
+          clientId.value = message.clientId || clientId.value
           break
         case 'room_state':
           room.value = message.room
@@ -127,13 +176,34 @@ export function useRoomConnection() {
             hostId: message.hostId,
             participants: message.participants,
             scoreToWin: message.scoreToWin,
+            spectator: Boolean(message.spectator),
+            phaseEndsAtServerTime: Number(message.phaseEndsAtServerTime) || null,
           }
+          hostMigration.value = null
           latestSnapshot.value = null
           remoteInput.value = null
           remoteLaunchCommit.value = null
           break
-        case 'match_snapshot':
+        case 'host_migrated':
           latestSnapshot.value = message.snapshot
+            ? {
+                ...message.snapshot,
+                _serverTime: Date.now(),
+              }
+            : latestSnapshot.value
+          hostMigration.value = {
+            roomId: message.roomId,
+            hostId: message.hostId,
+            statusText: message.statusText || '',
+            snapshot: latestSnapshot.value,
+            receivedAt: Date.now(),
+          }
+          break
+        case 'match_snapshot':
+          latestSnapshot.value = {
+            ...message.snapshot,
+            _serverTime: message.serverTime || Date.now(),
+          }
           break
         case 'remote_input':
           remoteInput.value = {
@@ -149,10 +219,23 @@ export function useRoomConnection() {
             sentAt: message.sentAt || Date.now(),
           }
           break
+        case 'time_sync': {
+          const clientSentAt = Number(message.clientSentAt) || Date.now()
+          const serverTime = Number(message.serverTime) || Date.now()
+          const now = Date.now()
+          const roundTrip = Math.max(0, now - clientSentAt)
+          const estimatedServerNow = serverTime + roundTrip * 0.5
+          const nextOffset = estimatedServerNow - now
+          serverTimeOffset.value = serverTimeOffset.value === 0
+            ? nextOffset
+            : serverTimeOffset.value * 0.75 + nextOffset * 0.25
+          break
+        }
         case 'left_room':
           room.value = null
           latestSnapshot.value = null
           latestMatchConfig.value = null
+          hostMigration.value = null
           remoteInput.value = null
           remoteLaunchCommit.value = null
           syncRoomUrl('')
@@ -196,7 +279,7 @@ export function useRoomConnection() {
     playerLoadout.value = normalizeLoadout(loadout)
     const ok = await ensureConnected()
     if (!ok) return false
-    send('set_identity', { name: playerName.value, build, loadout: playerLoadout.value, record: playerRecord.value })
+    send('set_identity', { name: playerName.value, build, loadout: playerLoadout.value, record: playerRecord.value, reconnectKey })
     send('create_room')
     return true
   }
@@ -207,7 +290,7 @@ export function useRoomConnection() {
     playerLoadout.value = normalizeLoadout(loadout)
     const ok = await ensureConnected()
     if (!ok) return false
-    send('set_identity', { name: playerName.value, build, loadout: playerLoadout.value, record: playerRecord.value })
+    send('set_identity', { name: playerName.value, build, loadout: playerLoadout.value, record: playerRecord.value, reconnectKey })
     send('join_room', { roomId: roomId.toUpperCase() })
     return true
   }
@@ -216,7 +299,7 @@ export function useRoomConnection() {
     playerName.value = normalizePlayerName(name || playerName.value)
     playerRecord.value = normalizeRecord(record || playerRecord.value)
     playerLoadout.value = normalizeLoadout(loadout || playerLoadout.value)
-    send('update_profile', { name: playerName.value, build, loadout: playerLoadout.value, record: playerRecord.value })
+    send('update_profile', { name: playerName.value, build, loadout: playerLoadout.value, record: playerRecord.value, reconnectKey })
   }
 
   function setReady(ready) {
@@ -265,6 +348,7 @@ export function useRoomConnection() {
   })
 
   onUnmounted(() => {
+    stopTimeSync()
     if (socket.value) socket.value.close()
   })
 
@@ -281,8 +365,10 @@ export function useRoomConnection() {
     isHost,
     latestSnapshot,
     latestMatchConfig,
+    hostMigration,
     remoteInput,
     remoteLaunchCommit,
+    serverTimeOffset,
     ensureConnected,
     connectAndCreateRoom,
     connectAndJoinRoom,
@@ -295,5 +381,6 @@ export function useRoomConnection() {
     sendSnapshot,
     sendLaunchCommit,
     sendMatchComplete,
+    estimateServerTime,
   }
 }

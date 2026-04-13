@@ -25,6 +25,7 @@ const {
   hudPlayers,
   buildEntries,
   sessionIntermission,
+  spectatorMode,
   roundResult,
   countdown,
   launchBadges,
@@ -76,7 +77,9 @@ const roomError = computed(() => roomApi.errorMessage.value)
 const isHost = computed(() => roomApi.isHost.value)
 const connectionState = computed(() => roomApi.connectionState.value)
 const localRoomPlayer = computed(() => roomPlayers.value.find((player) => player.id === roomApi.clientId.value) || null)
-const allPlayersReady = computed(() => roomPlayers.value.length >= 2 && roomPlayers.value.every((player) => player.ready))
+const localHudPlayer = computed(() => hudPlayers.value.find((entry) => entry.isLocal) || null)
+const connectedRoomPlayers = computed(() => roomPlayers.value.filter((player) => player.connected !== false))
+const allPlayersReady = computed(() => connectedRoomPlayers.value.length >= 2 && connectedRoomPlayers.value.every((player) => player.ready))
 const canStartRoomMatch = computed(() => isHost.value && allPlayersReady.value)
 const connectionLabel = computed(() => {
   if (roomApi.connectionState.value === 'connected') return 'Server Online'
@@ -122,6 +125,7 @@ function getRecordLine(record, matchType) {
 }
 
 function getRoomPlayerStatus(player) {
+  if (player?.connected === false) return 'Reconnecting'
   if (player?.pendingJoin) return 'Next Round'
   if (player?.ready) return 'Ready'
   if (roomApi.room.value?.matchActive) return 'In Session'
@@ -132,6 +136,8 @@ const activeRecordLabel = computed(() => menuMode.value === 'online' ? 'VS Playe
 const activeRecordValue = computed(() => getRecordLine(playerRecord.value, menuMode.value === 'online' ? 'player' : 'cpu'))
 const launchSpinIcon = computed(() => launchState.value.spinDir > 0 ? RotateCw : RotateCcw)
 const launchPowerPercent = computed(() => Math.round(launchState.value.charge * 100))
+const intermissionRoundStats = computed(() => roundResult.value?.summary?.players || [])
+const intermissionRoundDuration = computed(() => roundResult.value?.summary?.duration ?? null)
 const launchTimingCursorStyle = computed(() => ({ left: `${Math.round(launchState.value.countdownProgress * 100)}%` }))
 const launchTimingWindowStyle = computed(() => {
   const width = Math.max(8, launchState.value.perfectWindowProgress * 100)
@@ -169,6 +175,21 @@ const launchHudPositionStyle = computed(() => {
     transform: 'translateX(-50%)',
   }
 })
+const localBladePointerVisible = computed(() => (
+  gamePhase.value === 'battle'
+  && !spectatorMode.value
+  && countdown.value === null
+  && !sessionIntermission.value.active
+  && !roundResult.value
+  && Boolean(localHudPlayer.value?.alive)
+  && launchState.value.screenVisible
+))
+const localBladePointerStyle = computed(() => ({
+  left: `clamp(28px, ${launchState.value.screenX}%, calc(100% - 28px))`,
+  top: `max(78px, calc(${launchState.value.screenY}% - 58px))`,
+  '--cb-pointer-color': launchState.value.color,
+  '--cb-pointer-accent': launchState.value.accent,
+}))
 
 function getLaunchBadgeTheme(grade) {
   if (grade === 'Perfect') return { color: '#FFE500', glow: 'rgba(255,229,0,0.34)' }
@@ -433,7 +454,7 @@ onUnmounted(() => {
         </div>
 
         <div v-if="countdown !== null" class="absolute inset-0 z-25 pointer-events-none" style="z-index:25">
-          <div class="absolute w-[min(360px,calc(100%-2rem))] launch-hud-wrap" :style="launchHudPositionStyle">
+          <div v-if="!spectatorMode" class="absolute w-[min(360px,calc(100%-2rem))] launch-hud-wrap" :style="launchHudPositionStyle">
             <div class="launch-hud" :class="{ 'is-locked': launchState.locked }" :style="launchHudStyle">
               <div class="flex items-center justify-between gap-3">
                 <div class="min-w-0">
@@ -501,6 +522,17 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <div v-if="spectatorMode" class="absolute left-1/2 top-[96px] z-[26] -translate-x-1/2 pointer-events-none">
+          <div class="px-4 py-2 text-center bg-black/70 border border-white/10 backdrop-blur-md" style="clip-path: polygon(10px 0,100% 0,calc(100% - 10px) 100%,0 100%)">
+            <div class="text-[8px] uppercase tracking-[0.38em] text-white/38">Spectating</div>
+            <div class="mt-1 text-[11px] font-black uppercase tracking-[0.12em] text-[#FFE500]">You join next round</div>
+          </div>
+        </div>
+
+        <div v-if="localBladePointerVisible" class="cb-local-pointer" :style="localBladePointerStyle">
+          <div class="cb-local-pointer-chevron" />
+        </div>
+
         <TransitionGroup name="launch-grade-pop" tag="div">
           <div
             v-for="badge in visibleLaunchBadges"
@@ -525,6 +557,46 @@ onUnmounted(() => {
               <div class="text-[8px] uppercase tracking-[0.58em] text-white/38">Session Break</div>
               <div class="mt-2 text-[clamp(1.8rem,3vw,2.5rem)] font-black uppercase tracking-[0.08em] text-[#FFE500]">Next Round In {{ sessionIntermission.seconds }}</div>
               <div class="mt-2 text-[11px] uppercase tracking-[0.22em] text-white/46">Pick a new blade or keep your current one</div>
+
+              <div v-if="intermissionRoundStats.length" class="mt-5 text-left">
+                <div class="flex items-center justify-between gap-3 border-b border-white/8 pb-2">
+                  <span class="text-[8px] uppercase tracking-[0.46em] text-white/36">Round Breakdown</span>
+                  <span v-if="intermissionRoundDuration !== null" class="text-[9px] uppercase tracking-[0.24em] text-[#FFE500]/80">{{ intermissionRoundDuration.toFixed(1) }}s</span>
+                </div>
+                <div class="mt-3 grid gap-2.5">
+                  <div
+                    v-for="entry in intermissionRoundStats"
+                    :key="`round-stat-${entry.id}`"
+                    class="rounded-[10px] border px-3 py-2"
+                    :style="{ borderColor: `${BUILD_DEFS[entry.build].color}33`, background: `linear-gradient(135deg, ${BUILD_DEFS[entry.build].color}12 0%, rgba(255,255,255,0.03) 100%)` }"
+                  >
+                    <div class="flex items-center gap-2">
+                      <div class="w-2.5 h-2.5" :style="{ background: BUILD_DEFS[entry.build].color, clipPath: 'polygon(50% 0,100% 50%,50% 100%,0 50%)' }" />
+                      <span class="font-black uppercase tracking-[0.12em] text-[11px]">{{ entry.isLocal ? 'You' : entry.name }}</span>
+                      <span class="text-[8px] uppercase tracking-[0.22em] text-white/34">{{ BUILD_DEFS[entry.build].name }}</span>
+                      <span class="ml-auto text-[9px] font-black uppercase tracking-[0.18em]" :style="{ color: entry.result === 'Winner' ? '#FFE500' : 'rgba(255,255,255,0.58)' }">{{ entry.result }}</span>
+                    </div>
+                    <div class="mt-2 grid grid-cols-4 gap-2 text-center">
+                      <div>
+                        <div class="text-[7px] uppercase tracking-[0.24em] text-white/28">Launch</div>
+                        <div class="mt-1 text-[10px] font-black uppercase tracking-[0.12em]" :style="{ color: BUILD_DEFS[entry.build].accent }">{{ entry.launchGrade }}</div>
+                      </div>
+                      <div>
+                        <div class="text-[7px] uppercase tracking-[0.24em] text-white/28">Max Hit</div>
+                        <div class="mt-1 text-[10px] font-black uppercase tracking-[0.12em] text-white/78">{{ entry.maxImpact.toFixed(1) }}</div>
+                      </div>
+                      <div>
+                        <div class="text-[7px] uppercase tracking-[0.24em] text-white/28">Spin Dealt</div>
+                        <div class="mt-1 text-[10px] font-black uppercase tracking-[0.12em] text-white/78">{{ entry.spinDamageDealt.toFixed(1) }}</div>
+                      </div>
+                      <div>
+                        <div class="text-[7px] uppercase tracking-[0.24em] text-white/28">Survival</div>
+                        <div class="mt-1 text-[10px] font-black uppercase tracking-[0.12em] text-white/78">{{ entry.survivalTime.toFixed(1) }}s</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
 
               <div class="mt-4 grid grid-cols-5 gap-2">
                 <button
@@ -1228,6 +1300,31 @@ onUnmounted(() => {
   clip-path: polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
   backdrop-filter: blur(12px);
   transform: translate(-50%, calc(-100% - 18px));
+}
+
+.cb-local-pointer {
+  position: absolute;
+  z-index: 27;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  transform: translate(-50%, -100%);
+}
+
+.cb-local-pointer-chevron {
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 9px solid color-mix(in srgb, var(--cb-pointer-accent) 78%, white 22%);
+  opacity: 0.82;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--cb-pointer-accent) 28%, transparent));
+  animation: cb-pointer-bob 1.1s ease-in-out infinite alternate;
+}
+
+@keyframes cb-pointer-bob {
+  from { transform: translateY(0); }
+  to { transform: translateY(3px); }
 }
 
 .session-intermission-card {

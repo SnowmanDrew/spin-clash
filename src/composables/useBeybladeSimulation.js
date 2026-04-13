@@ -154,6 +154,24 @@ const TRICK_SPECIAL = {
   edgeOutwardDamping: 0.9,
 }
 
+const IMPACT_EFFECT = {
+  eventLifetimeMs: 280,
+  flashFade: 7.4,
+  flashBaseScale: 1,
+  flashImpactScale: 0.085,
+  flashMaxOpacity: 0.92,
+  flashLift: 0.08,
+  sparkCount: 18,
+  sparkBonusCount: 18,
+  sparkSpeed: 8.2,
+  sparkLift: 1.1,
+  sparkLifeMin: 0.2,
+  sparkLifeMax: 0.4,
+  sparkGravity: 11.5,
+  sparkDrag: 0.94,
+  arcImpactThreshold: 5.8,
+}
+
 const CPU_LAUNCH = {
   baseCharge: 0.72,
   chargeVariance: 0.12,
@@ -593,6 +611,157 @@ function createTrickFlash(accent) {
   return flash
 }
 
+function createImpactFlash() {
+  const flash = new THREE.Mesh(
+    new THREE.RingGeometry(0.34, 0.72, 28),
+    new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  )
+  flash.rotation.x = -Math.PI / 2
+  flash.visible = false
+  return flash
+}
+
+function disposeImpactMesh(mesh) {
+  if (!mesh) return
+  mesh.geometry?.dispose?.()
+  if (Array.isArray(mesh.material)) mesh.material.forEach((material) => material?.dispose?.())
+  else mesh.material?.dispose?.()
+}
+
+function clearImpactParticles(runtimeState) {
+  if (!runtimeState?.scene) return
+  for (const particle of runtimeState.impactParticles || []) {
+    runtimeState.scene.remove(particle.mesh)
+    disposeImpactMesh(particle.mesh)
+  }
+  runtimeState.impactParticles = []
+}
+
+function spawnLocalImpactBurst(runtimeState, position, color, accent, impact) {
+  if (!runtimeState?.scene) return
+
+  const primaryColor = new THREE.Color(color || 0xf8fafc)
+  const accentColor = new THREE.Color(accent || 0xfbbf24)
+  const intensity = clamp01(impact / 12)
+
+  if (runtimeState.clashFlash) {
+    runtimeState.clashFlash.visible = true
+    runtimeState.clashFlash.position.set(position.x, position.y + IMPACT_EFFECT.flashLift, position.z)
+    runtimeState.clashFlash.scale.setScalar(IMPACT_EFFECT.flashBaseScale + impact * IMPACT_EFFECT.flashImpactScale)
+    runtimeState.clashFlash.material.color.copy(accentColor)
+    runtimeState.clashFlash.material.opacity = Math.min(IMPACT_EFFECT.flashMaxOpacity, 0.26 + impact * 0.055)
+  }
+
+  const sparkCount = IMPACT_EFFECT.sparkCount + Math.round(intensity * IMPACT_EFFECT.sparkBonusCount)
+  for (let index = 0; index < sparkCount; index += 1) {
+    const spark = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.028 + Math.random() * 0.045, 0),
+      new THREE.MeshBasicMaterial({
+        color: index % 4 === 0 ? accentColor : primaryColor,
+        transparent: true,
+        opacity: 0.96,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    )
+    spark.position.copy(position)
+    spark.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI)
+    runtimeState.scene.add(spark)
+
+    const angle = Math.random() * Math.PI * 2
+    const speed = (0.45 + Math.random() * 0.9 + intensity * 0.7) * IMPACT_EFFECT.sparkSpeed
+    const upward = IMPACT_EFFECT.sparkLift + Math.random() * (2.4 + intensity * 2.2)
+    const life = IMPACT_EFFECT.sparkLifeMin + Math.random() * (IMPACT_EFFECT.sparkLifeMax - IMPACT_EFFECT.sparkLifeMin)
+    runtimeState.impactParticles.push({
+      mesh: spark,
+      type: 'spark',
+      life,
+      maxLife: life,
+      vx: Math.cos(angle) * speed,
+      vz: Math.sin(angle) * speed,
+      vy: upward,
+      spin: (Math.random() - 0.5) * 18,
+    })
+  }
+
+  if (impact >= IMPACT_EFFECT.arcImpactThreshold) {
+    const arc = new THREE.Mesh(
+      new THREE.TorusGeometry(0.62 + intensity * 0.34, 0.032 + intensity * 0.022, 10, 28, Math.PI * (1.18 + intensity * 0.42)),
+      new THREE.MeshBasicMaterial({
+        color: accentColor,
+        transparent: true,
+        opacity: 0.88,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    )
+    arc.rotation.x = Math.PI / 2
+    arc.rotation.z = Math.random() * Math.PI * 2
+    arc.position.copy(position)
+    runtimeState.scene.add(arc)
+    const life = 0.14 + intensity * 0.12
+    runtimeState.impactParticles.push({
+      mesh: arc,
+      type: 'arc',
+      life,
+      maxLife: life,
+      spin: (Math.random() - 0.5) * (10 + intensity * 10),
+      growth: 2.2 + intensity * 1.8,
+    })
+  }
+}
+
+function updateImpactEffects(runtimeState, dt) {
+  if (!runtimeState) return
+
+  if (runtimeState.clashFlash) {
+    runtimeState.clashFlash.material.opacity = Math.max(0, runtimeState.clashFlash.material.opacity - dt * IMPACT_EFFECT.flashFade)
+    runtimeState.clashFlash.visible = runtimeState.clashFlash.material.opacity > 0.001
+    runtimeState.clashFlash.scale.lerp(tmpScreenPos.setScalar(1), clamp01(dt * 8))
+  }
+
+  for (let index = runtimeState.impactParticles.length - 1; index >= 0; index -= 1) {
+    const particle = runtimeState.impactParticles[index]
+    particle.life -= dt
+    const ratio = clamp01(particle.life / Math.max(0.0001, particle.maxLife || particle.life || 1))
+    if (particle.type === 'arc') {
+      particle.mesh.rotation.z += dt * particle.spin
+      particle.mesh.scale.multiplyScalar(1 + dt * particle.growth)
+      particle.mesh.material.opacity = ratio * 0.9
+    } else {
+      particle.mesh.position.x += particle.vx * dt
+      particle.mesh.position.y += particle.vy * dt
+      particle.mesh.position.z += particle.vz * dt
+      particle.vx *= Math.pow(IMPACT_EFFECT.sparkDrag, dt * 60)
+      particle.vz *= Math.pow(IMPACT_EFFECT.sparkDrag, dt * 60)
+      particle.vy -= IMPACT_EFFECT.sparkGravity * dt
+      particle.mesh.rotation.x += dt * particle.spin
+      particle.mesh.rotation.y += dt * particle.spin * 0.8
+      particle.mesh.scale.setScalar(0.34 + ratio * 1.2)
+      particle.mesh.material.opacity = Math.pow(ratio, 0.55)
+    }
+
+    if (particle.life <= 0) {
+      runtimeState.scene.remove(particle.mesh)
+      disposeImpactMesh(particle.mesh)
+      runtimeState.impactParticles.splice(index, 1)
+    }
+  }
+
+  if (runtimeState.authoritative && Array.isArray(runtimeState.recentImpactEvents)) {
+    const now = Date.now()
+    runtimeState.recentImpactEvents = runtimeState.recentImpactEvents.filter((event) => (event.expiresAt || 0) > now)
+  }
+}
+
 function setMarkerOpacity(marker, opacity) {
   for (const material of marker.userData.materials || []) {
     material.opacity = opacity
@@ -867,6 +1036,13 @@ function getLaunchPowerPercent(blade, charge, launchScore, forced = false) {
   return Math.round(clamp01(currentPower / maxPower) * 100)
 }
 
+function getCountdownDisplayValue(timeRemaining) {
+  if (timeRemaining > 2.5) return 3
+  if (timeRemaining > 1.5) return 2
+  if (timeRemaining > 0.6) return 1
+  return 0
+}
+
 function getOpeningClashPushScale(attacker, defender, runtimeState) {
   const elapsed = runtimeState?.fightElapsed || 0
   if (elapsed >= OPENING_CLASH.duration) return 1
@@ -1074,6 +1250,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
   const roundResult = ref(null)
   const countdown = ref(null)
   const sessionIntermission = ref({ active: false, seconds: 0 })
+  const spectatorMode = ref(false)
   const aimAngle = ref(0)
   const launchBadges = ref([])
   const launchState = ref({
@@ -1163,6 +1340,87 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       active: true,
       seconds: Math.max(0, Math.ceil(runtimeState.intermissionTimer || 0)),
     }
+  }
+
+  function syncSpectatorState(runtimeState = runtime) {
+    spectatorMode.value = Boolean(runtimeState?.spectator)
+  }
+
+  function createRoundStatEntry(blade) {
+    return {
+      id: blade.id,
+      name: blade.name,
+      build: blade.key,
+      isLocal: blade.isLocal,
+      isCpu: blade.kind === 'cpu',
+      launchGrade: blade.launchGrade || 'Unreleased',
+      maxImpact: 0,
+      spinDamageDealt: 0,
+      spinDamageTaken: 0,
+      eliminatedAt: null,
+    }
+  }
+
+  function ensureRoundStatEntry(runtimeState, blade) {
+    if (!runtimeState.roundStatsById.has(blade.id)) {
+      runtimeState.roundStatsById.set(blade.id, createRoundStatEntry(blade))
+    }
+    const entry = runtimeState.roundStatsById.get(blade.id)
+    entry.name = blade.name
+    entry.build = blade.key
+    entry.isLocal = blade.isLocal
+    entry.isCpu = blade.kind === 'cpu'
+    entry.launchGrade = blade.launchGrade || entry.launchGrade || 'Unreleased'
+    return entry
+  }
+
+  function markBladeEliminated(runtimeState, blade) {
+    const entry = ensureRoundStatEntry(runtimeState, blade)
+    if (entry.eliminatedAt == null) {
+      entry.eliminatedAt = runtimeState.fightElapsed
+    }
+  }
+
+  function buildRoundBreakdown(runtimeState, winnerBlade) {
+    const entries = runtimeState.blades.map((blade) => {
+      const entry = ensureRoundStatEntry(runtimeState, blade)
+      const survivalTime = entry.eliminatedAt == null ? runtimeState.fightElapsed : entry.eliminatedAt
+      return {
+        id: blade.id,
+        name: blade.name,
+        build: blade.key,
+        isLocal: blade.isLocal,
+        isCpu: blade.kind === 'cpu',
+        launchGrade: entry.launchGrade,
+        maxImpact: Number(entry.maxImpact.toFixed(1)),
+        spinDamageDealt: Number(entry.spinDamageDealt.toFixed(1)),
+        spinDamageTaken: Number(entry.spinDamageTaken.toFixed(1)),
+        survivalTime: Number(survivalTime.toFixed(1)),
+        result: blade.id === winnerBlade.id
+          ? 'Winner'
+          : (blade.deathType === 'ring_out' ? 'Ring Out' : 'Spin Out'),
+      }
+    })
+
+    entries.sort((a, b) => {
+      if (a.id === winnerBlade.id) return -1
+      if (b.id === winnerBlade.id) return 1
+      if (b.survivalTime !== a.survivalTime) return b.survivalTime - a.survivalTime
+      if (b.spinDamageDealt !== a.spinDamageDealt) return b.spinDamageDealt - a.spinDamageDealt
+      return a.name.localeCompare(b.name)
+    })
+
+    return {
+      duration: Number(runtimeState.fightElapsed.toFixed(1)),
+      players: entries,
+    }
+  }
+
+  function getPhaseTimeRemaining(runtimeState) {
+    if (!runtimeState.networked || !runtimeState.phaseEndsAtServerTime || !roomApi?.estimateServerTime) {
+      return null
+    }
+    return Math.max(0, (runtimeState.phaseEndsAtServerTime - roomApi.estimateServerTime()) / 1000)
   }
 
   function commitPlayerRecord(matchType, didWin) {
@@ -1345,15 +1603,52 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       : false
   }
 
+  function emitImpactEvent(runtimeState, position, color, accent, impact) {
+    spawnLocalImpactBurst(runtimeState, position, color, accent, impact)
+    if (!runtimeState.authoritative || !Array.isArray(runtimeState.recentImpactEvents)) return
+    runtimeState.recentImpactEvents.push({
+      id: runtimeState.nextImpactEventId++,
+      x: Number(position.x.toFixed(3)),
+      y: Number(position.y.toFixed(3)),
+      z: Number(position.z.toFixed(3)),
+      color,
+      accent,
+      impact: Number(impact.toFixed(3)),
+      expiresAt: Date.now() + IMPACT_EFFECT.eventLifetimeMs,
+    })
+  }
+
+  function syncImpactEvents(runtimeState, impactEvents = []) {
+    if (!impactEvents?.length) return
+    for (const event of impactEvents) {
+      if (!event || runtimeState.seenImpactEventIds.has(event.id)) continue
+      runtimeState.seenImpactEventIds.add(event.id)
+      runtimeState.seenImpactEventOrder.push(event.id)
+      if (runtimeState.seenImpactEventOrder.length > 64) {
+        const staleId = runtimeState.seenImpactEventOrder.shift()
+        runtimeState.seenImpactEventIds.delete(staleId)
+      }
+      spawnLocalImpactBurst(
+        runtimeState,
+        new THREE.Vector3(event.x || 0, event.y || 0, event.z || 0),
+        event.color,
+        event.accent,
+        event.impact || 0,
+      )
+    }
+  }
+
   function makeSnapshot(runtimeState) {
     return {
       phase: runtimeState.phase,
       intermissionTimer: runtimeState.intermissionTimer,
+      phaseEndsAtServerTime: runtimeState.phaseEndsAtServerTime || null,
       countdown: countdown.value,
       status: status.value,
       round: runtimeState.round,
       scores: runtimeState.scores,
       roundResult: roundResult.value,
+      impactEvents: runtimeState.recentImpactEvents?.map(({ id, x, y, z, color, accent, impact }) => ({ id, x, y, z, color, accent, impact })) || [],
       players: runtimeState.participants.map((participant) => {
         const blade = runtimeState.bladesById.get(participant.id)
         const pos = blade.rb.translation()
@@ -1409,12 +1704,19 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
   function disposeRuntime() {
     if (!runtime) return
     runtime.destroyed = true
+    clearImpactParticles(runtime)
+    if (runtime.clashFlash) {
+      runtime.scene?.remove(runtime.clashFlash)
+      disposeImpactMesh(runtime.clashFlash)
+      runtime.clashFlash = null
+    }
     runtime.cleanupFns.forEach((fn) => {
       try { fn() } catch (_) {}
     })
     if (keyCleanup) keyCleanup()
     launchBadges.value = []
     sessionIntermission.value = { active: false, seconds: 0 }
+    spectatorMode.value = false
     runtime = null
   }
 
@@ -2293,6 +2595,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       || hardExit) {
       blade.deathType = 'ring_out'
       blade.alive = false
+      markBladeEliminated(runtimeState, blade)
       startRingOutVisual(blade)
     }
 
@@ -2315,6 +2618,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     if (blade.spin <= 0.1) {
       blade.alive = false
       blade.deathType = blade.deathType || 'spin_out'
+      markBladeEliminated(runtimeState, blade)
       blade.rb.setLinvel({ x: 0, y: 0, z: 0 }, true)
     }
     if (!blade.alive) {
@@ -2448,8 +2752,11 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     spinLossB *= SPIN_DRAIN.collisionScale
     a.spin = Math.max(0, a.spin - spinLossA)
     b.spin = Math.max(0, b.spin - spinLossB)
+    let stealToA = 0
+    let stealToB = 0
     if (a.vampireDrain > 0) {
       const steal = Math.min(1.25, spinLossB * 0.9)
+      stealToA = steal
       b.spin = Math.max(0, b.spin - steal)
       a.spin = Math.min(80, a.spin + steal * 0.75)
       a.rubberDrainBurst = RUBBER_SPECIAL.burstDuration
@@ -2459,6 +2766,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     }
     if (b.vampireDrain > 0) {
       const steal = Math.min(1.25, spinLossA * 0.9)
+      stealToB = steal
       a.spin = Math.max(0, a.spin - steal)
       b.spin = Math.min(80, b.spin + steal * 0.75)
       b.rubberDrainBurst = RUBBER_SPECIAL.burstDuration
@@ -2471,13 +2779,39 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       a.spin = Math.max(0, a.spin + Math.max(0, spinEdge) * 0.3)
       b.spin = Math.max(0, b.spin + Math.max(0, -spinEdge) * 0.3)
     }
+    const statsA = ensureRoundStatEntry(runtimeState, a)
+    const statsB = ensureRoundStatEntry(runtimeState, b)
+    statsA.maxImpact = Math.max(statsA.maxImpact, impact)
+    statsB.maxImpact = Math.max(statsB.maxImpact, impact)
+    statsA.spinDamageDealt += spinLossB + stealToA
+    statsA.spinDamageTaken += spinLossA + stealToB
+    statsB.spinDamageDealt += spinLossA + stealToB
+    statsB.spinDamageTaken += spinLossB + stealToA
     a.special = Math.min(100, a.special + impact * 1.1 * SPECIAL_GAIN.collisionScale)
     b.special = Math.min(100, b.special + impact * 1.1 * SPECIAL_GAIN.collisionScale)
     a.wobble = Math.min(0.52, a.wobble + (0.016 + impact * 0.005 / defenseA) * (sameSpin ? 1 : 1.22) * (a.def.physics.wobbleGainMultiplier || 1))
     b.wobble = Math.min(0.52, b.wobble + (0.016 + impact * 0.005 / defenseB) * (sameSpin ? 1 : 1.22) * (b.def.physics.wobbleGainMultiplier || 1))
+    const impactPos = new THREE.Vector3(
+      (pa.x + pb.x) * 0.5,
+      getSurfaceYAtXZ((pa.x + pb.x) * 0.5, (pa.z + pb.z) * 0.5, 0.12),
+      (pa.z + pb.z) * 0.5,
+    )
+    const impactColor = new THREE.Color(a.def.accent || a.def.color).lerp(new THREE.Color(b.def.accent || b.def.color), 0.5).getHex()
+    const impactAccent = new THREE.Color(a.def.color).lerp(new THREE.Color(b.def.color), 0.5).offsetHSL(0, 0, 0.18).getHex()
+    emitImpactEvent(runtimeState, impactPos, impactColor, impactAccent, impact)
     a.lastImpact = 0.4
     b.lastImpact = 0.4
     runtimeState.cameraShake = Math.max(runtimeState.cameraShake, Math.min(0.4, impact * 0.015))
+    if (impact > 4.8) {
+      noiseBurst(0.034 + Math.min(0.04, impact * 0.003), 0.045 + Math.min(0.03, impact * 0.003))
+      beep({
+        freq: 190 + impact * 22,
+        duration: 0.028 + Math.min(0.025, impact * 0.002),
+        type: impact > 8.2 ? 'sawtooth' : 'square',
+        gain: 0.012 + Math.min(0.018, impact * 0.0015),
+        slideTo: 110 + impact * 8,
+      })
+    }
   }
 
   function pushSnapshot(runtimeState) {
@@ -2491,10 +2825,28 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
   function applySnapshot(runtimeState, snapshot) {
     runtimeState.phase = snapshot.phase
     runtimeState.intermissionTimer = snapshot.intermissionTimer || 0
+    runtimeState.phaseEndsAtServerTime = snapshot.phaseEndsAtServerTime || null
     runtimeState.round = snapshot.round
     status.value = snapshot.status
-    countdown.value = snapshot.countdown
     roundResult.value = snapshot.roundResult || null
+    const syncedPhaseTime = getPhaseTimeRemaining(runtimeState)
+    if (runtimeState.phase === 'aiming' && syncedPhaseTime != null) {
+      runtimeState.countdownTimer = syncedPhaseTime
+      countdown.value = getCountdownDisplayValue(runtimeState.countdownTimer)
+    } else {
+      countdown.value = snapshot.countdown
+    }
+    if (runtimeState.phase === 'session_intermission' && syncedPhaseTime != null) {
+      runtimeState.intermissionTimer = syncedPhaseTime
+    }
+    syncImpactEvents(runtimeState, snapshot.impactEvents || [])
+    if (runtimeState.spectator) {
+      if (runtimeState.phase === 'fighting') {
+        status.value = 'Spectating current round. You will join next round.'
+      } else if (runtimeState.phase === 'aiming') {
+        status.value = 'Next round is lining up. You will join after this round.'
+      }
+    }
     updateSessionIntermissionState(runtimeState)
     if (runtimeState.networked && roundResult.value?.winner) {
       commitOnlineRoundRecord(runtimeState, roundResult.value.winner)
@@ -3080,7 +3432,6 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       const lockSlash = createAttackSlash(0xfff3bf)
       lockSlash.visible = false
       scene.add(lockSlash)
-
       const spawn = spawnPoints[index]
       const rb = createBladeBody(spawn, def)
 
@@ -3171,12 +3522,16 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       return blade
     }
 
+    const clashFlash = createImpactFlash()
+    scene.add(clashFlash)
+
     config.participants.forEach(createBlade)
 
     const runtimeState = {
       ...config,
-      authoritative: config.type !== 'online-client',
+      authoritative: config.type !== 'online-client' && config.type !== 'online-spectator',
       networked: config.type.startsWith('online'),
+      spectator: Boolean(config.spectator),
       destroyed: false,
       scene,
       renderer,
@@ -3210,10 +3565,21 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       countdownBeats: [3.5, 2.5, 1.5, 0.6],
       countdownValues: [3, 2, 1, 0],
       cameraShake: 0,
+      clashFlash,
+      impactParticles: [],
+      recentImpactEvents: [],
+      nextImpactEventId: 1,
+      seenImpactEventIds: new Set(),
+      seenImpactEventOrder: [],
       remoteLaunchCommits: new Map(),
+      roundStatsById: new Map(),
+      phaseEndsAtServerTime: config.phaseEndsAtServerTime || null,
+      pendingPhaseEndsAtServerTime: config.phaseEndsAtServerTime || null,
       cleanupFns: [],
       recordCommitted: false,
     }
+
+    syncSpectatorState(runtimeState)
 
     function setBladeArrow(blade) {
       const dir = new THREE.Vector3(Math.cos(blade.launchAngle), 0, Math.sin(blade.launchAngle))
@@ -3331,14 +3697,25 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       runtimeState.phase = 'aiming'
       runtimeState.intermissionTimer = 0
       runtimeState.fightElapsed = 0
-      runtimeState.countdownTimer = AIM_COUNTDOWN_DURATION
+      runtimeState.phaseEndsAtServerTime = runtimeState.networked && roomApi?.estimateServerTime
+        ? (runtimeState.pendingPhaseEndsAtServerTime || (roomApi.estimateServerTime() + AIM_COUNTDOWN_DURATION * 1000))
+        : null
+      runtimeState.pendingPhaseEndsAtServerTime = null
+      runtimeState.countdownTimer = runtimeState.phaseEndsAtServerTime && roomApi?.estimateServerTime
+        ? Math.max(0, (runtimeState.phaseEndsAtServerTime - roomApi.estimateServerTime()) / 1000)
+        : AIM_COUNTDOWN_DURATION
       runtimeState.nextCountdownIndex = 0
       runtimeState.remoteLaunchCommits.clear()
       runtimeState.localLaunchCommitSent = false
-      countdown.value = 3
+      runtimeState.roundStatsById = new Map()
+      countdown.value = runtimeState.spectator && !runtimeState.phaseEndsAtServerTime
+        ? null
+        : getCountdownDisplayValue(runtimeState.countdownTimer)
       roundResult.value = null
       updateSessionIntermissionState(runtimeState)
-      status.value = runtimeState.authoritative
+      status.value = runtimeState.spectator
+        ? 'Spectating current round. You will join next round.'
+        : runtimeState.authoritative
         ? 'Hold SPACE to charge, release before GO, aim with A / D, set spin with W / S.'
         : 'Hold SPACE to charge, release before GO. Your launch locks locally and syncs to the host.'
       for (const blade of runtimeState.blades) {
@@ -3394,6 +3771,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
           blade.charge = 0
           blade.launchAngle = blade.spawn.angle
         }
+        ensureRoundStatEntry(runtimeState, blade)
         setBladeArrow(blade)
         updateAttackLockVisual(blade)
         syncMesh(blade)
@@ -3423,6 +3801,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         updateAttackLockVisual(blade)
       }
       runtimeState.phase = 'fighting'
+      runtimeState.phaseEndsAtServerTime = null
       runtimeState.fightElapsed = 0
       countdown.value = null
       const localBlade = runtimeState.bladesById.get(runtimeState.localPlayerId)
@@ -3453,6 +3832,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         outcome: winnerLabel,
         winner: winnerBlade.id,
         isMatchOver: matchComplete,
+        summary: buildRoundBreakdown(runtimeState, winnerBlade),
       }
       status.value = `${winnerBlade.name} takes round ${runtimeState.round}.`
       const localBlade = runtimeState.bladesById.get(runtimeState.localPlayerId)
@@ -3465,6 +3845,9 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       }
       runtimeState.phase = runtimeState.networked && !runtimeState.matchOver ? 'session_intermission' : 'round_end'
       runtimeState.intermissionTimer = runtimeState.phase === 'session_intermission' ? ONLINE_SESSION_INTERMISSION_DURATION : 0
+      runtimeState.phaseEndsAtServerTime = runtimeState.phase === 'session_intermission' && roomApi?.estimateServerTime
+        ? roomApi.estimateServerTime() + ONLINE_SESSION_INTERMISSION_DURATION * 1000
+        : null
       runtimeState.roundResetTimer = runtimeState.matchOver ? 3 : 2.2
       if (runtimeState.phase === 'session_intermission' && runtimeState.authoritative && roomApi) {
         roomApi.admitPendingPlayers()
@@ -3500,11 +3883,8 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
 
       if (runtimeState.authoritative) {
         if (runtimeState.phase === 'aiming') {
-          runtimeState.countdownTimer -= dt
-          while (runtimeState.nextCountdownIndex < runtimeState.countdownBeats.length && runtimeState.countdownTimer <= runtimeState.countdownBeats[runtimeState.nextCountdownIndex]) {
-            countdown.value = runtimeState.countdownValues[runtimeState.nextCountdownIndex]
-            runtimeState.nextCountdownIndex += 1
-          }
+          runtimeState.countdownTimer = getPhaseTimeRemaining(runtimeState) ?? Math.max(0, runtimeState.countdownTimer - dt)
+          countdown.value = getCountdownDisplayValue(runtimeState.countdownTimer)
 
           for (const blade of runtimeState.blades) {
             if (blade.kind === 'cpu') {
@@ -3560,7 +3940,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
             updateBlade(blade, dt, runtimeState)
             updateAttackLockVisual(blade)
           }
-          runtimeState.intermissionTimer = Math.max(0, runtimeState.intermissionTimer - dt)
+          runtimeState.intermissionTimer = getPhaseTimeRemaining(runtimeState) ?? Math.max(0, runtimeState.intermissionTimer - dt)
           updateSessionIntermissionState(runtimeState)
           status.value = `Next round in ${Math.max(1, Math.ceil(runtimeState.intermissionTimer))}. Choose your blade.`
           if (runtimeState.intermissionTimer <= 0) {
@@ -3591,16 +3971,18 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         }
         pushSnapshot(runtimeState)
       } else {
-        runtimeState.sendInputAccumulator += dt
-        if (runtimeState.sendInputAccumulator >= 0.05 && roomApi) {
-          runtimeState.sendInputAccumulator = 0
-          roomApi.sendInput(runtimeState.localInput)
+        if (!runtimeState.spectator) {
+          runtimeState.sendInputAccumulator += dt
+          if (runtimeState.sendInputAccumulator >= 0.05 && roomApi) {
+            runtimeState.sendInputAccumulator = 0
+            roomApi.sendInput(runtimeState.localInput)
+          }
         }
         syncRuntimeParticipantsFromRoom(runtimeState)
         if (roomApi?.latestSnapshot?.value) {
           applySnapshot(runtimeState, roomApi.latestSnapshot.value)
         }
-        if (runtimeState.phase === 'aiming') {
+        if (runtimeState.phase === 'aiming' && !runtimeState.spectator) {
           const localBlade = runtimeState.bladesById.get(runtimeState.localPlayerId)
           if (localBlade) {
             applyHumanInput(localBlade, runtimeState.localInput, dt, 'aiming', runtimeState)
@@ -3618,6 +4000,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
         }
       }
 
+      updateImpactEffects(runtimeState, dt)
       updateHud(runtimeState)
       const shake = runtimeState.cameraShake
       runtimeState.cameraShake = Math.max(0, runtimeState.cameraShake - dt * 1.8)
@@ -3659,16 +4042,44 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       : 0
     gamePhase.value = 'battle'
     beginMatch({
-      type: roomApi.isHost.value ? 'online-host' : 'online-client',
+      type: roomApi.isHost.value ? 'online-host' : (matchConfig.spectator ? 'online-spectator' : 'online-client'),
       localPlayerId: roomApi.clientId.value,
       scoreToWin: matchConfig.scoreToWin,
       initialRecordedRound,
+      spectator: Boolean(matchConfig.spectator),
+      phaseEndsAtServerTime: matchConfig.phaseEndsAtServerTime,
       participants: matchConfig.participants.map((participant) => ({
         ...participant,
         loadout: normalizeLoadout(participant.loadout || participant.build),
         kind: 'human',
       })),
     })
+  }
+
+  function adoptHostMigration(event) {
+    if (!event || !runtime || !runtime.networked) return
+    const isNowHost = event.hostId === runtime.localPlayerId
+    runtime.authoritative = isNowHost && !runtime.spectator
+    if (event.snapshot) {
+      applySnapshot(runtime, event.snapshot)
+    }
+
+    if (isNowHost) {
+      runtime.spectator = false
+      runtime.snapshotAccumulator = 0
+      runtime.sendInputAccumulator = 0
+      runtime.localLaunchCommitSent = false
+      spectatorMode.value = false
+      runtime.remoteInputs.clear()
+      runtime.remoteLaunchCommits.clear()
+      status.value = event.statusText || 'You are now hosting the session.'
+    } else if (event.statusText) {
+      status.value = event.statusText
+    }
+
+    syncSpectatorState(runtime)
+    updateSessionIntermissionState(runtime)
+    updateHud(runtime)
   }
 
   function returnToMenu() {
@@ -3698,6 +4109,11 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
       if (!payload || !runtime || !runtime.authoritative) return
       runtime.remoteLaunchCommits.set(payload.playerId, normalizeLaunchCommit(payload.launch))
     })
+
+    watch(() => roomApi.hostMigration.value, (event) => {
+      if (!event) return
+      adoptHostMigration(event)
+    })
   }
 
   onUnmounted(() => {
@@ -3719,6 +4135,7 @@ export function useBeybladeSimulation(mountRef, roomApi = null) {
     hudPlayers,
     buildEntries,
     sessionIntermission,
+    spectatorMode,
     discEntries,
     driverEntries,
     roundResult,
